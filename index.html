@@ -33,6 +33,10 @@
                 <p class="text-gray-400 text-sm font-light">Real-time Trading & Liquidity Control Dashboard</p>
             </div>
             <div class="flex items-center gap-4">
+                <div id="conn-status" class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 text-[10px] font-bold tracking-widest text-gray-400">
+                    <span class="w-2 h-2 rounded-full bg-red-500" id="conn-dot"></span>
+                    DISCONNECTED
+                </div>
                 <div id="status-badge" class="px-4 py-2 rounded-full text-xs font-semibold tracking-widest text-white uppercase toggle-active">
                     ACTIVE
                 </div>
@@ -51,7 +55,10 @@
                     <span id="btc-price">--</span> 
                     <span class="text-xs text-emerald-400 font-normal">USDT</span>
                 </div>
-                <div class="text-[10px] text-gray-500">Live feed from Biconomy</div>
+                <div class="text-[10px] text-gray-500 flex justify-between">
+                    <span>Live feed from Biconomy</span>
+                    <span id="uptime-display">Up: 0s</span>
+                </div>
             </div>
 
             <!-- AIR Target -->
@@ -149,13 +156,30 @@
                 const response = await fetch('/api/status');
                 const data = await response.json();
                 
+                // Connection Status
+                const connStatus = document.getElementById('conn-status');
+                const connDot = document.getElementById('conn-dot');
+                if (connDot) {
+                    connDot.className = 'w-2 h-2 rounded-full bg-emerald-500 animate-pulse';
+                }
+                if (connStatus) {
+                    connStatus.childNodes[connStatus.childNodes.length - 1].nodeValue = ' CONNECTED';
+                    connStatus.className = 'flex items-center gap-2 px-3 py-1.5 rounded-lg bg-emerald-500/10 text-[10px] font-bold tracking-widest text-emerald-400';
+                }
+
                 document.getElementById('btc-price').innerText = data.btc_price.toLocaleString();
                 document.getElementById('air-target').innerText = data.air_target.toFixed(4);
                 document.getElementById('vol-ratio').innerText = data.vol_ratio.toFixed(2);
                 document.getElementById('usdt-bal').innerText = data.usdt_bal.toLocaleString();
                 document.getElementById('air-bal').innerText = data.air_bal.toLocaleString();
-                document.getElementById('last-status').innerText = data.last_status;
+                document.getElementById('last-status').innerText = data.last_status || 'Syncing...';
                 document.getElementById('beta-val-display').innerText = data.beta.toFixed(1);
+
+                // Uptime
+                const h = Math.floor(data.uptime / 3600);
+                const m = Math.floor((data.uptime % 3600) / 60);
+                const s = data.uptime % 60;
+                document.getElementById('uptime-display').innerText = `Up: ${h}h ${m}m ${s}s`;
 
                 // Update Progress Bar
                 const ratioPct = Math.min((data.vol_ratio / 10) * 100, 100);
@@ -171,7 +195,16 @@
                     document.getElementById('status-badge').className = 'px-4 py-2 rounded-full text-xs font-semibold tracking-widest text-white uppercase toggle-inactive';
                     document.getElementById('toggle-btn').innerText = 'START BOT';
                 }
-            } catch (err) { console.error('Error fetching status:', err); }
+            } catch (err) { 
+                console.error('Error fetching status:', err); 
+                const connStatus = document.getElementById('conn-status');
+                const connDot = document.getElementById('conn-dot');
+                if (connDot) connDot.className = 'w-2 h-2 rounded-full bg-red-500';
+                if (connStatus) {
+                    connStatus.childNodes[connStatus.childNodes.length - 1].nodeValue = ' DISCONNECTED';
+                    connStatus.className = 'flex items-center gap-2 px-3 py-1.5 rounded-lg bg-red-500/10 text-[10px] font-bold tracking-widest text-red-500';
+                }
+            }
         }
 
         async function fetchLogs() {

@@ -24,6 +24,7 @@ app = FastAPI()
 # 글로벌 상태 공유
 config = BotConfig()
 bot = MarketMaker(config)
+start_time = time.time()
 
 # ── 바인딩 및 라우트 ──────────────────────────────
 @app.get("/")
@@ -43,7 +44,8 @@ async def get_status():
         "air_bal": bot.air_bal,
         "last_status": bot.last_status,
         "beta": config.beta,
-        "interval": config.interval
+        "interval": config.interval,
+        "uptime": int(time.time() - start_time)
     }
 
 @app.post("/api/toggle")
