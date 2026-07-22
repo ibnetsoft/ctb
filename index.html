@@ -23,8 +23,19 @@
 <body class="p-6">
     <div class="max-w-7xl mx-auto space-y-6">
         
-        <!-- Header -->
-        <header class="flex justify-between items-center glass p-6 rounded-2xl">
+        <!-- Tab Navigation -->
+        <nav class="flex gap-2">
+            <button onclick="switchTab('dashboard')" id="tab-dashboard" class="px-6 py-2 rounded-xl text-sm font-bold transition-all bg-emerald-500 text-black">
+                DASHBOARD
+            </button>
+            <button onclick="switchTab('settings')" id="tab-settings" class="px-6 py-2 rounded-xl text-sm font-bold transition-all bg-white/5 text-gray-400 hover:bg-white/10">
+                SETTINGS
+            </button>
+        </nav>
+
+        <div id="view-dashboard" class="space-y-6">
+            <!-- Header -->
+            <header class="flex justify-between items-center glass p-6 rounded-2xl">
             <div class="space-y-1">
                 <h1 class="text-3xl font-bold tracking-tight text-white flex items-center gap-3">
                     <span class="w-3 h-3 rounded-full bg-emerald-400 group-hover:animate-ping inline-block"></span>
@@ -139,18 +150,195 @@
                            class="w-full h-1.5 bg-white/10 rounded-lg appearance-none cursor-pointer accent-emerald-400">
                 </div>
 
+                <!-- Target Price Control -->
+                <div class="space-y-4">
+                    <div class="flex justify-between">
+                        <label class="text-sm font-bold text-gray-300">Target Price (USDT)</label>
+                    </div>
+                    <input type="number" id="target-price-input" min="0.00001" max="1.0" step="0.00001" value="0.00004"
+                           class="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:border-emerald-500 outline-none transition-all text-emerald-400 font-bold">
+                    <p class="text-[10px] text-gray-500 italic">Sets the target price for the bot to trade (e.g. 0.00004).</p>
+                </div>
+
+                <!-- Auto Pause Control -->
+                <div class="space-y-4 pt-4 border-t border-white/10">
+                    <div class="flex justify-between items-center">
+                        <label class="text-sm font-bold text-gray-300">Auto Pause</label>
+                        <label class="relative inline-flex items-center cursor-pointer">
+                            <input type="checkbox" id="auto-pause-toggle" class="sr-only peer">
+                            <div class="w-9 h-5 bg-white/10 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-gray-300 after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-emerald-500"></div>
+                        </label>
+                    </div>
+                    <div class="grid grid-cols-2 gap-2 text-xs">
+                        <div class="space-y-1">
+                            <label class="text-gray-400">Run (Min)</label>
+                            <input type="number" id="run-duration-input" min="1" max="1440" value="120"
+                                   class="w-full bg-white/5 border border-white/10 rounded-lg px-2 py-1.5 text-center text-white focus:border-emerald-500 outline-none">
+                        </div>
+                        <div class="space-y-1">
+                            <label class="text-gray-400">Pause (Min)</label>
+                            <input type="number" id="pause-duration-input" min="1" max="1440" value="30"
+                                   class="w-full bg-white/5 border border-white/10 rounded-lg px-2 py-1.5 text-center text-white focus:border-emerald-500 outline-none">
+                        </div>
+                    </div>
+                </div>
+
                 <div class="pt-6 border-t border-white/10 text-center">
                     <button onclick="updateParams()" class="w-full bg-emerald-500 hover:bg-emerald-400 text-black font-bold py-3 rounded-2xl transition-all">
                         APPLY SETTINGS
                     </button>
                     <p class="text-[10px] mt-4 text-gray-500">Settings are pushed instantly to the running bot instance.</p>
                 </div>
+            </div> <!-- End Controls -->
+        </div> <!-- End Grid Layout -->
+    </div> <!-- End Dashboard View -->
+
+        <!-- Settings View -->
+        <div id="view-settings" class="hidden animate-in fade-in duration-500">
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <!-- API Settings -->
+                <div class="glass p-8 rounded-3xl space-y-6">
+                    <h3 class="text-xl font-bold flex items-center gap-2">
+                        <span class="p-2 bg-emerald-500/10 rounded-lg text-emerald-400">🔑</span>
+                        API Configuration
+                    </h3>
+                    <div class="space-y-4">
+                        <div class="space-y-2">
+                            <label class="text-xs text-gray-400 uppercase tracking-widest font-bold">API Key</label>
+                            <input type="text" id="set-api-key" placeholder="Enter API Key" 
+                                   class="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:border-emerald-500 outline-none transition-all">
+                        </div>
+                        <div class="space-y-2">
+                            <label class="text-xs text-gray-400 uppercase tracking-widest font-bold">Secret Key</label>
+                            <input type="password" id="set-secret-key" placeholder="Enter Secret Key" 
+                                   class="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:border-emerald-500 outline-none transition-all">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Telegram Alerts -->
+                <div class="glass p-8 rounded-3xl space-y-6">
+                    <div class="flex justify-between items-center">
+                        <h3 class="text-xl font-bold flex items-center gap-2">
+                            <span class="p-2 bg-blue-500/10 rounded-lg text-blue-400">✈️</span>
+                            Telegram Alerts
+                        </h3>
+                        <label class="relative inline-flex items-center cursor-pointer">
+                            <input type="checkbox" id="set-tg-enabled" class="sr-only peer">
+                            <div class="w-11 h-6 bg-white/10 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-gray-300 after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-emerald-500"></div>
+                        </label>
+                    </div>
+                    <div class="space-y-4 text-gray-300">
+                        <div class="space-y-2">
+                            <label class="text-xs text-gray-400 uppercase tracking-widest font-bold">Bot Token</label>
+                            <input type="text" id="set-tg-token" placeholder="bot123456:ABC-DEF..." 
+                                   class="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:border-blue-500 outline-none transition-all">
+                        </div>
+                        <div class="space-y-2">
+                            <label class="text-xs text-gray-400 uppercase tracking-widest font-bold">Chat ID (숫자)</label>
+                            <input type="text" id="set-tg-chat-id" placeholder="123456789" 
+                                   class="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:border-blue-500 outline-none transition-all">
+                        </div>
+                        <p class="text-[10px] text-gray-500 bg-white/5 p-3 rounded-lg leading-relaxed">
+                            💡 텔레그램에서 <b>@userinfobot</b> 혹은 사용 중인 봇에게 메시지를 보내 <b>ID</b>를 확인하실 수 있습니다. 봇을 채널/그룹에 초대하고 토큰과 ID를 입력해 주세요.
+                        </p>
+                    </div>
+                </div>
             </div>
 
+            <!-- Action Buttons -->
+            <div class="flex gap-4 mt-8">
+                <button onclick="saveSettings()" class="flex-1 bg-emerald-500 hover:bg-emerald-400 text-black font-bold py-4 rounded-2xl transition-all shadow-lg shadow-emerald-500/20">
+                    SAVE & APPLY CHANGES
+                </button>
+                <button onclick="testTelegram()" class="px-8 bg-white/5 hover:bg-white/10 text-white font-bold py-4 rounded-2xl transition-all border border-white/10">
+                    TEST TELEGRAM
+                </button>
+            </div>
         </div>
     </div>
 
     <script>
+        let currentTab = 'dashboard';
+        let isInitialized = false;
+
+        function switchTab(tab) {
+            currentTab = tab;
+            const dashView = document.getElementById('view-dashboard');
+            const settingsView = document.getElementById('view-settings');
+            const dashTab = document.getElementById('tab-dashboard');
+            const settingsTab = document.getElementById('tab-settings');
+
+            if (tab === 'dashboard') {
+                dashView.classList.remove('hidden');
+                settingsView.classList.add('hidden');
+                dashTab.className = 'px-6 py-2 rounded-xl text-sm font-bold transition-all bg-emerald-500 text-black';
+                settingsTab.className = 'px-6 py-2 rounded-xl text-sm font-bold transition-all bg-white/5 text-gray-400 hover:bg-white/10';
+                isInitialized = false;
+                fetchStatus();
+            } else {
+                dashView.classList.add('hidden');
+                settingsView.classList.remove('hidden');
+                dashTab.className = 'px-6 py-2 rounded-xl text-sm font-bold transition-all bg-white/5 text-gray-400 hover:bg-white/10';
+                settingsTab.className = 'px-6 py-2 rounded-xl text-sm font-bold transition-all bg-blue-500 text-white';
+                loadSettings();
+            }
+        }
+
+        async function loadSettings() {
+            try {
+                const res = await fetch('/api/settings');
+                const data = await res.json();
+                document.getElementById('set-api-key').value = data.api_key;
+                document.getElementById('set-secret-key').value = data.secret_key;
+                document.getElementById('set-tg-token').value = data.telegram_token;
+                document.getElementById('set-tg-chat-id').value = data.telegram_chat_id;
+                document.getElementById('set-tg-enabled').checked = data.telegram_enabled;
+            } catch (err) { console.error('Failed to load settings:', err); }
+        }
+
+        async function saveSettings() {
+            const btn = event.target;
+            const originalText = btn.innerText;
+            btn.innerText = 'SAVING...';
+            btn.disabled = true;
+
+            const data = {
+                api_key: document.getElementById('set-api-key').value,
+                secret_key: document.getElementById('set-secret-key').value,
+                telegram_token: document.getElementById('set-tg-token').value,
+                telegram_chat_id: document.getElementById('set-tg-chat-id').value,
+                telegram_enabled: document.getElementById('set-tg-enabled').checked
+            };
+
+            try {
+                const res = await fetch('/api/settings', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(data)
+                });
+                const result = await res.json();
+                if (result.status === 'success') {
+                    alert('Settings saved successfully! Bot will use new keys in the next loop.');
+                }
+            } catch (err) { alert('Failed to save settings'); }
+            
+            btn.innerText = originalText;
+            btn.disabled = false;
+        }
+
+        async function testTelegram() {
+            const btn = event.target;
+            btn.disabled = true;
+            try {
+                const res = await fetch('/api/test_telegram', { method: 'POST' });
+                const result = await res.json();
+                if (result.status === 'success') alert('Success! Check your Telegram.');
+                else alert('Error: ' + result.message);
+            } catch (err) { alert('Test failed'); }
+            btn.disabled = false;
+        }
+
         async function fetchStatus() {
             try {
                 const response = await fetch('/api/status');
@@ -168,12 +356,39 @@
                 }
 
                 document.getElementById('btc-price').innerText = data.btc_price.toLocaleString();
-                document.getElementById('air-target').innerText = data.air_target.toFixed(4);
+                document.getElementById('air-target').innerText = data.air_target.toFixed(5);
                 document.getElementById('vol-ratio').innerText = data.vol_ratio.toFixed(2);
                 document.getElementById('usdt-bal').innerText = data.usdt_bal.toLocaleString();
                 document.getElementById('air-bal').innerText = data.air_bal.toLocaleString();
                 document.getElementById('last-status').innerText = data.last_status || 'Syncing...';
                 document.getElementById('beta-val-display').innerText = data.beta.toFixed(1);
+                
+                // Initialize inputs only once on load (or when isInitialized is reset to false)
+                if (!isInitialized) {
+                    const targetPriceInput = document.getElementById('target-price-input');
+                    if (targetPriceInput) targetPriceInput.value = data.air_target;
+                    
+                    const autoPauseToggle = document.getElementById('auto-pause-toggle');
+                    if (autoPauseToggle) autoPauseToggle.checked = data.auto_pause_enabled;
+                    
+                    const runDurationInput = document.getElementById('run-duration-input');
+                    if (runDurationInput) runDurationInput.value = data.run_duration;
+                    
+                    const pauseDurationInput = document.getElementById('pause-duration-input');
+                    if (pauseDurationInput) pauseDurationInput.value = data.pause_duration;
+
+                    const betaRange = document.getElementById('beta-range');
+                    if (betaRange) {
+                        betaRange.value = data.beta;
+                        document.getElementById('beta-val').innerText = data.beta.toFixed(1);
+                    }
+                    const intervalRange = document.getElementById('interval-range');
+                    if (intervalRange) {
+                        intervalRange.value = data.interval;
+                        document.getElementById('interval-val').innerText = data.interval + 's';
+                    }
+                    isInitialized = true;
+                }
 
                 // Uptime
                 const h = Math.floor(data.uptime / 3600);
@@ -239,13 +454,18 @@
         async function updateParams() {
             const beta = document.getElementById('beta-range').value;
             const interval = document.getElementById('interval-range').value;
+            const target_price = document.getElementById('target-price-input').value;
+            const auto_pause_enabled = document.getElementById('auto-pause-toggle').checked;
+            const run_duration = document.getElementById('run-duration-input').value;
+            const pause_duration = document.getElementById('pause-duration-input').value;
             
             await fetch('/api/config', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ beta, interval })
+                body: JSON.stringify({ beta, interval, target_price, auto_pause_enabled, run_duration, pause_duration })
             });
             alert('Settings Applied!');
+            isInitialized = false;
             fetchStatus();
         }
 
@@ -258,8 +478,8 @@
         });
 
         // Intervals
-        setInterval(fetchStatus, 3000);
-        setInterval(fetchLogs, 2000);
+        setInterval(() => { if(currentTab === 'dashboard') fetchStatus(); }, 3000);
+        setInterval(() => { if(currentTab === 'dashboard') fetchLogs(); }, 2000);
         fetchStatus();
         fetchLogs();
     </script>

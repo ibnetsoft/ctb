@@ -45,7 +45,10 @@ async def get_status():
         "last_status": bot.last_status,
         "beta": config.beta,
         "interval": config.interval,
-        "uptime": int(time.time() - start_time)
+        "uptime": int(time.time() - start_time),
+        "auto_pause_enabled": config.auto_pause_enabled,
+        "run_duration": config.run_duration,
+        "pause_duration": config.pause_duration
     }
 
 @app.post("/api/toggle")
@@ -57,6 +60,59 @@ async def toggle_bot():
 async def update_config(data: dict):
     if "beta" in data: config.beta = float(data["beta"])
     if "interval" in data: config.interval = int(data["interval"])
+    if "target_price" in data:
+        config.target_price = float(data["target_price"])
+        bot.target_mid = config.target_price
+    if "auto_pause_enabled" in data:
+        config.auto_pause_enabled = bool(data["auto_pause_enabled"])
+    if "run_duration" in data:
+        config.run_duration = int(data["run_duration"])
+    if "pause_duration" in data:
+        config.pause_duration = int(data["pause_duration"])
+    config.save_config()
+    return {"status": "success"}
+
+@app.get("/api/settings")
+async def get_settings():
+    return {
+        "api_key": config.api_key[:4] + "*" * (len(config.api_key)-8) + config.api_key[-4:] if config.api_key else "",
+        "secret_key": config.secret_key[:4] + "*" * (len(config.secret_key)-8) + config.secret_key[-4:] if config.secret_key else "",
+        "telegram_token": config.telegram_token[:4] + "*" * (len(config.telegram_token)-8) + config.telegram_token[-4:] if config.telegram_token else "",
+        "telegram_chat_id": config.telegram_chat_id,
+        "telegram_enabled": config.telegram_enabled,
+        "target_price": config.target_price,
+        "auto_pause_enabled": config.auto_pause_enabled,
+        "run_duration": config.run_duration,
+        "pause_duration": config.pause_duration
+    }
+
+@app.post("/api/settings")
+async def save_settings(data: dict):
+    # 실제 키가 입력된 경우만 업데이트 (마스킹된 값 무시)
+    if "api_key" in data and "*" not in data["api_key"]: config.api_key = data["api_key"]
+    if "secret_key" in data and "*" not in data["secret_key"]: config.secret_key = data["secret_key"]
+    if "telegram_token" in data and "*" not in data["telegram_token"]: config.telegram_token = data["telegram_token"]
+    if "telegram_chat_id" in data: config.telegram_chat_id = data["telegram_chat_id"]
+    if "telegram_enabled" in data: config.telegram_enabled = data["telegram_enabled"]
+    if "target_price" in data:
+        config.target_price = float(data["target_price"])
+        bot.target_mid = config.target_price
+    if "auto_pause_enabled" in data:
+        config.auto_pause_enabled = bool(data["auto_pause_enabled"])
+    if "run_duration" in data:
+        config.run_duration = int(data["run_duration"])
+    if "pause_duration" in data:
+        config.pause_duration = int(data["pause_duration"])
+    
+    config.save_config()
+    return {"status": "success"}
+
+@app.post("/api/test_telegram")
+async def test_telegram():
+    if not config.telegram_token or not config.telegram_chat_id:
+        return {"status": "error", "message": "설정 정보가 부족합니다."}
+    
+    bot.send_telegram("🔔 테스트 메시지입니다. 연결이 확인되었습니다!")
     return {"status": "success"}
 
 @app.get("/api/logs")
@@ -70,7 +126,7 @@ def start_bot():
 def open_browser():
     """브라우저 자동 열기"""
     time.sleep(1.5) # 서버 부팅 대기
-    webbrowser.open("http://localhost:8000")
+    webbrowser.open("http://localhost:8050")
 
 @app.on_event("startup")
 async def startup_event():
@@ -84,5 +140,5 @@ async def startup_event():
 if __name__ == "__main__":
     import uvicorn
     # 외부 접근 허용을 위해 0.0.0.0 권장하나, 로컬 전용이면 127.0.0.1도 가능
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8050)
 
