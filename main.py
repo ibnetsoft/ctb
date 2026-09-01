@@ -48,7 +48,11 @@ async def get_status():
         "uptime": int(time.time() - start_time),
         "auto_pause_enabled": config.auto_pause_enabled,
         "run_duration": config.run_duration,
-        "pause_duration": config.pause_duration
+        "pause_duration": config.pause_duration,
+        "price_oscillation_enabled": config.price_oscillation_enabled,
+        "price_min": config.price_min,
+        "price_max": config.price_max,
+        "price_step": config.price_step
     }
 
 @app.post("/api/toggle")
@@ -63,6 +67,14 @@ async def update_config(data: dict):
     if "target_price" in data:
         config.target_price = float(data["target_price"])
         bot.target_mid = config.target_price
+    if "price_oscillation_enabled" in data:
+        config.price_oscillation_enabled = bool(data["price_oscillation_enabled"])
+    if "price_min" in data:
+        config.price_min = float(data["price_min"])
+    if "price_max" in data:
+        config.price_max = float(data["price_max"])
+    if "price_step" in data:
+        config.price_step = float(data["price_step"])
     if "auto_pause_enabled" in data:
         config.auto_pause_enabled = bool(data["auto_pause_enabled"])
     if "run_duration" in data:
@@ -81,6 +93,10 @@ async def get_settings():
         "telegram_chat_id": config.telegram_chat_id,
         "telegram_enabled": config.telegram_enabled,
         "target_price": config.target_price,
+        "price_oscillation_enabled": config.price_oscillation_enabled,
+        "price_min": config.price_min,
+        "price_max": config.price_max,
+        "price_step": config.price_step,
         "auto_pause_enabled": config.auto_pause_enabled,
         "run_duration": config.run_duration,
         "pause_duration": config.pause_duration
@@ -97,6 +113,14 @@ async def save_settings(data: dict):
     if "target_price" in data:
         config.target_price = float(data["target_price"])
         bot.target_mid = config.target_price
+    if "price_oscillation_enabled" in data:
+        config.price_oscillation_enabled = bool(data["price_oscillation_enabled"])
+    if "price_min" in data:
+        config.price_min = float(data["price_min"])
+    if "price_max" in data:
+        config.price_max = float(data["price_max"])
+    if "price_step" in data:
+        config.price_step = float(data["price_step"])
     if "auto_pause_enabled" in data:
         config.auto_pause_enabled = bool(data["auto_pause_enabled"])
     if "run_duration" in data:

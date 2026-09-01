@@ -126,12 +126,12 @@ class SimpleMarketMaker:
         res = self.private_post("/api/v1/private/trade/limit", {
             "market": symbol,
             "side": side,
-            "price": "{:.5f}".format(round(price, 5)),   
-            "amount": "{:.4f}".format(round(amount, 4)), 
+            "price": "{:.8f}".format(round(price, 8)),   
+            "amount": "{:.3f}".format(round(amount, 3)), 
         })
         if res.get("code") == 0:
             side_str = "매수" if side == 2 else "매도"
-            self.log(f"{side_str} 성공: {price:.5f} | 수량: {amount}")
+            self.log(f"{side_str} 성공: {price:.8f} | 수량: {amount}")
         return res
 
     def run_mm_loop(self):
@@ -198,14 +198,10 @@ class SimpleMarketMaker:
                     time.sleep(10)
                     continue
                         
-                cur_ob = self.get_orderbook(symbol)
-                if not cur_ob or not cur_ob.get('asks') or not cur_ob.get('bids'):
-                    time.sleep(2)
-                    continue
-                    
-                macro_wall_air = round(macro_wall_usdt / target_price, 1)
+                # 2. 타겟 가격 및 매수벽 크기 계산 (8자리 소수점 지원)
+                macro_wall_air = round(macro_wall_usdt / target_price, 3)
                 
-                self.log(f"🟢 [매수벽 설치] {target_price:.5f} 에 {macro_wall_air} AIR (${macro_wall_usdt:.1f}) 매수벽 올림!")
+                self.log(f"🟢 [매수벽 설치] {target_price:.8f} 에 {macro_wall_air:.3f} AIR (${macro_wall_usdt:.1f}) 매수벽 올림!")
                 res_buy = self.place_order(symbol, 2, target_price, macro_wall_air)
                 if not res_buy or res_buy.get("code") != 0:
                     time.sleep(2)
@@ -213,27 +209,25 @@ class SimpleMarketMaker:
                     
                 self.usdt_bal -= macro_wall_usdt
                 washed_air = 0.0
-                target_sell_air = macro_wall_air * 0.90 # 90%만 매도하고 10%는 남김
+                target_sell_air = round(macro_wall_air * 0.90, 3) # 90%만 매도하고 10%는 남김
                 
                 immediate_retry = False
                 
                 while washed_air < target_sell_air:
                     fresh_ob = self.get_orderbook(symbol)
-                    if not fresh_ob or not fresh_ob.get('bids'):
-                        time.sleep(1)
-                        continue
+                    bids = fresh_ob.get('bids', []) if fresh_ob else []
+                    if bids:
+                        current_best_bid = float(bids[0][0])
+                        total_bid_vol_at_target = sum(float(bid[1]) for bid in bids if abs(float(bid[0]) - target_price) < 1e-7)
                         
-                    current_best_bid = float(fresh_ob['bids'][0][0])
-                    total_bid_vol_at_target = sum(float(bid[1]) for bid in fresh_ob['bids'] if abs(float(bid[0]) - target_price) < 0.000001)
-                    
-                    if current_best_bid < target_price - 1e-6 or total_bid_vol_at_target < 10.0:
-                        self.log(f"🎉/🚨 [물량 소진 감지] 타인이 내 매수벽에 물량을 던졌습니다! (저가 매수 흡수 성공) 다음 턴으로 진행합니다.")
-                        immediate_retry = True
-                        break
+                        if current_best_bid < target_price - 1e-7 or total_bid_vol_at_target < 10.0:
+                            self.log(f"🎉/🚨 [물량 소진 감지] 타인이 내 매수벽에 물량을 던졌습니다! (저가 매수 흡수 성공) 다음 턴으로 진행합니다.")
+                            immediate_retry = True
+                            break
                         
                     sell_chunk_usdt = random.uniform(14.0, 16.0)
-                    sell_chunk_air = round(sell_chunk_usdt / target_price, 1)
-                    actual_sell_air = min(sell_chunk_air, target_sell_air - washed_air)
+                    sell_chunk_air = round(sell_chunk_usdt / target_price, 3)
+                    actual_sell_air = round(min(sell_chunk_air, target_sell_air - washed_air), 3)
                     
                     if actual_sell_air * target_price < 5.0:
                         break
@@ -241,7 +235,7 @@ class SimpleMarketMaker:
                     res_sell = self.place_order(symbol, 1, target_price, actual_sell_air)
                     if res_sell and res_sell.get("code") == 0:
                         washed_air += actual_sell_air
-                        self.log(f"💥 [자전 매도] {actual_sell_air} AIR (${actual_sell_air*target_price:.1f}) 매도 완료 (진행률: {washed_air/target_sell_air*100:.1f}%)")
+                        self.log(f"💥 [자전 매도] {actual_sell_air:.3f} AIR (${actual_sell_air*target_price:.1f}) 매도 완료 (진행률: {washed_air/target_sell_air*100:.1f}%)")
                     else:
                         break
                         
