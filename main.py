@@ -63,6 +63,45 @@ async def toggle_bot():
     config.is_running = not config.is_running
     return {"is_running": config.is_running}
 
+@app.post("/api/manual_sweep")
+async def manual_sweep(data: dict = {}):
+    price = float(data.get("price", 0)) if data.get("price") else None
+    amount_usdt = float(data.get("amount_usdt", 15.0))
+    res = bot.execute_manual_sweep(sweep_price=price, usdt_amount=amount_usdt)
+    return res
+
+@app.post("/api/cancel_all")
+async def cancel_all():
+    count = bot.cancel_all_orders(config.symbol)
+    balances = bot.get_balances()
+    if balances:
+        bot.air_bal = float(balances.get("AIR", {}).get("available", "0"))
+        bot.usdt_bal = float(balances.get("USDT", {}).get("available", "0"))
+    return {"status": "success", "cancelled_count": count, "usdt_bal": bot.usdt_bal, "air_bal": bot.air_bal}
+
+@app.get("/api/orderbook")
+async def get_orderbook():
+    ob = bot.get_orderbook(config.symbol)
+    bids = ob.get("bids", [])
+    asks = ob.get("asks", [])
+    best_bid = float(bids[0][0]) if bids else 0.0
+    best_ask = float(asks[0][0]) if asks else 0.0
+    spread = best_ask - best_bid if (bids and asks) else 0.0
+    margin = max(0.00000002, spread * 0.04)
+    min_sweep = round(best_bid + margin, 8)
+    max_sweep = round(best_ask - margin, 8)
+    mid_sweep = round((best_bid + best_ask) / 2.0, 8)
+    return {
+        "best_bid": best_bid,
+        "best_ask": best_ask,
+        "spread": spread,
+        "min_sweep": min_sweep,
+        "max_sweep": max_sweep,
+        "mid_sweep": mid_sweep,
+        "bids": bids[:5],
+        "asks": asks[:5]
+    }
+
 @app.post("/api/config")
 async def update_config(data: dict):
     if "beta" in data: config.beta = float(data["beta"])

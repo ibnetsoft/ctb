@@ -59,6 +59,32 @@
 
         <!-- Stats Grid -->
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+            <!-- Best Bid & Ask -->
+            <div class="glass p-5 rounded-2xl stat-card space-y-2">
+                <p class="text-xs text-gray-400 uppercase tracking-widest font-semibold flex items-center justify-between">
+                    <span>LIVE SPREAD</span>
+                    <span id="spread-pct" class="text-emerald-400 font-bold text-[10px]">--%</span>
+                </p>
+                <div class="flex justify-between items-center text-sm pt-1">
+                    <span class="text-gray-400">🟢 매수벽(Bid)</span>
+                    <span id="ob-best-bid" class="font-bold text-emerald-400 font-mono">--</span>
+                </div>
+                <div class="flex justify-between items-center text-sm">
+                    <span class="text-gray-400">🔴 매도벽(Ask)</span>
+                    <span id="ob-best-ask" class="font-bold text-red-400 font-mono">--</span>
+                </div>
+            </div>
+
+            <!-- AIR Target / Safe Mid -->
+            <div class="glass p-5 rounded-2xl stat-card space-y-2">
+                <p class="text-xs text-emerald-500 uppercase tracking-widest font-semibold">SAFE SWEEP TARGET</p>
+                <div class="text-2xl font-bold text-emerald-400 neon-glow flex items-baseline gap-2">
+                    <span id="air-target" class="font-mono">--</span>
+                    <span class="text-xs font-normal">USDT</span>
+                </div>
+                <div class="text-[10px] text-gray-500">안전 스윕 범위: <span id="safe-range-display" class="font-mono text-gray-300">--</span></div>
+            </div>
+
             <!-- BTC Price -->
             <div class="glass p-5 rounded-2xl stat-card space-y-2">
                 <p class="text-xs text-gray-500 uppercase tracking-widest font-semibold">BTC CURRENT</p>
@@ -72,38 +98,16 @@
                 </div>
             </div>
 
-            <!-- AIR Target -->
-            <div class="glass p-5 rounded-2xl stat-card space-y-2">
-                <p class="text-xs text-emerald-500 uppercase tracking-widest font-semibold">AIR TARGET</p>
-                <div class="text-2xl font-bold text-emerald-400 neon-glow flex items-baseline gap-2">
-                    <span id="air-target">--</span>
-                    <span class="text-xs font-normal">USDT</span>
-                </div>
-                <div class="text-[10px] text-gray-500">Tracking Beta: <span id="beta-val-display" class="font-bold">--</span></div>
-            </div>
-
-            <!-- Volume Ratio -->
-            <div class="glass p-5 rounded-2xl stat-card space-y-2">
-                <p class="text-xs text-gray-500 uppercase tracking-widest font-semibold">VOL RATIO</p>
-                <div class="text-2xl font-bold text-white flex items-baseline gap-2">
-                    <span id="vol-ratio">--</span>
-                    <span class="text-xs font-normal text-gray-400">x</span>
-                </div>
-                <div class="w-full bg-white/5 h-1 rounded-full overflow-hidden mt-1">
-                    <div id="ratio-progress" class="bg-emerald-400 h-full w-[10%] transition-all duration-500"></div>
-                </div>
-            </div>
-
             <!-- Balance -->
             <div class="glass p-5 rounded-2xl stat-card space-y-2">
                 <p class="text-xs text-gray-500 uppercase tracking-widest font-semibold">ASSETS AVAILABLE</p>
                 <div class="flex justify-between items-center text-sm">
                     <span class="text-gray-400">USDT</span>
-                    <span id="usdt-bal" class="font-bold">--</span>
+                    <span id="usdt-bal" class="font-bold text-emerald-400">--</span>
                 </div>
                 <div class="flex justify-between items-center text-sm">
                     <span class="text-gray-400">AIR</span>
-                    <span id="air-bal" class="font-bold">--</span>
+                    <span id="air-bal" class="font-bold text-white">--</span>
                 </div>
             </div>
         </div>
@@ -112,109 +116,102 @@
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
             
             <!-- Logs - takes 2 cols -->
-            <div class="lg:col-span-2 glass rounded-3xl overflow-hidden flex flex-col min-h-[500px]">
+            <div class="lg:col-span-2 glass rounded-3xl overflow-hidden flex flex-col min-h-[520px]">
                 <div class="p-6 border-b border-white/10 flex justify-between items-center">
                     <h2 class="font-bold text-lg flex items-center gap-2">
                         Activity Log
                         <span class="pulse text-emerald-400 text-[10px]">● LIVE</span>
                     </h2>
-                    <span id="last-status" class="text-xs text-gray-500 italic">...</span>
+                    <div class="flex items-center gap-3">
+                        <button onclick="cancelAllOrders()" class="bg-red-500/20 hover:bg-red-500/30 text-red-400 text-xs px-3 py-1.5 rounded-lg font-bold border border-red-500/30 transition-all">
+                            🧹 미체결 주문 전체 취소
+                        </button>
+                        <span id="last-status" class="text-xs text-gray-500 italic">...</span>
+                    </div>
                 </div>
-                <div id="log-box" class="p-6 text-sm font-mono space-y-1 overflow-y-auto max-h-[420px] log-container">
+                <div id="log-box" class="p-6 text-sm font-mono space-y-1 overflow-y-auto max-h-[440px] log-container">
                     <div class="text-gray-500 italic">Waiting for bot activity...</div>
                 </div>
             </div>
 
             <!-- Controls - takes 1 col -->
-            <div class="glass rounded-3xl p-8 space-y-8">
-                <h2 class="font-bold text-xl mb-6">Live Controls</h2>
-                
-                <!-- Beta Control -->
-                <div class="space-y-4">
-                    <div class="flex justify-between">
-                        <label class="text-sm font-bold text-gray-300">Beta Multiplier</label>
-                        <span id="beta-val" class="text-emerald-400 font-bold">3.0</span>
-                    </div>
-                    <input type="range" id="beta-range" min="0.5" max="10.0" step="0.1" value="3.0" 
-                           class="w-full h-1.5 bg-white/10 rounded-lg appearance-none cursor-pointer accent-emerald-400">
-                    <p class="text-[10px] text-gray-500 italic">Adjusts how aggressively AIR follows BTC price moves.</p>
-                </div>
-
-                <!-- Interval Control -->
-                <div class="space-y-4">
-                    <div class="flex justify-between">
-                        <label class="text-sm font-bold text-gray-300">Interval (Sec)</label>
-                        <span id="interval-val" class="text-emerald-400 font-bold">5s</span>
-                    </div>
-                    <input type="range" id="interval-range" min="1" max="60" step="1" value="5" 
-                           class="w-full h-1.5 bg-white/10 rounded-lg appearance-none cursor-pointer accent-emerald-400">
-                </div>
-
-                <!-- Target Price Control -->
-                <div class="space-y-4">
-                    <div class="flex justify-between">
-                        <label class="text-sm font-bold text-gray-300">Target Price (USDT)</label>
-                    </div>
-                    <input type="number" id="target-price-input" min="0.00000001" max="1.0" step="0.00000001" value="0.00001500"
-                           class="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:border-emerald-500 outline-none transition-all text-emerald-400 font-bold">
-                    <p class="text-[10px] text-gray-500 italic">Sets the target price for the bot to trade (e.g. 0.00001500).</p>
-                </div>
-
-                <!-- Micro Organic Trading Control -->
-                <div class="space-y-4 pt-4 border-t border-white/10">
+            <div class="glass rounded-3xl p-6 space-y-6">
+                <!-- Manual Sweep Console -->
+                <div class="bg-emerald-500/10 border border-emerald-500/30 p-5 rounded-2xl space-y-4">
                     <div class="flex justify-between items-center">
+                        <h3 class="text-sm font-bold text-emerald-400 flex items-center gap-2">
+                            <span>⚡</span> 수동 스윕핑 (Manual Sweep)
+                        </h3>
+                        <span class="text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-bold">100% 무손실 방어</span>
+                    </div>
+                    
+                    <div class="space-y-3">
                         <div>
-                            <label class="text-sm font-bold text-gray-300">Micro Organic Mode</label>
-                            <p class="text-[10px] text-gray-500">최저 매도 하단 7째자리 미세 거래</p>
+                            <div class="flex justify-between items-center mb-1">
+                                <label class="text-xs text-gray-300">스윕 가격 (USDT)</label>
+                                <button onclick="setRecommendedPrice()" class="text-[10px] text-emerald-400 underline font-semibold hover:text-emerald-300">
+                                    추천 중간가 자동 입력
+                                </button>
+                            </div>
+                            <input type="number" id="manual-price-input" min="0.00000001" max="1.0" step="0.00000001" placeholder="0.00000850"
+                                   class="w-full bg-black/40 border border-white/20 rounded-xl px-3 py-2 text-sm text-emerald-400 font-mono font-bold focus:border-emerald-500 outline-none">
                         </div>
-                        <label class="relative inline-flex items-center cursor-pointer">
-                            <input type="checkbox" id="micro-range-toggle" class="sr-only peer" checked>
-                            <div class="w-9 h-5 bg-white/10 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-gray-300 after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-emerald-500"></div>
-                        </label>
+
+                        <div>
+                            <label class="text-xs text-gray-300 block mb-1">거래 금액 (USDT)</label>
+                            <input type="number" id="manual-usdt-input" min="10.0" max="100.0" step="1.0" value="15.0"
+                                   class="w-full bg-black/40 border border-white/20 rounded-xl px-3 py-2 text-sm text-white font-mono font-bold focus:border-emerald-500 outline-none">
+                        </div>
+
+                        <button onclick="triggerManualSweep()" id="manual-sweep-btn" class="w-full bg-emerald-500 hover:bg-emerald-400 text-black font-bold py-3 rounded-xl transition-all shadow-lg shadow-emerald-500/20 flex items-center justify-center gap-2">
+                            <span>⚡</span> 1회 즉시 스윕 실행
+                        </button>
                     </div>
-                    <div class="grid grid-cols-2 gap-2 text-xs">
-                        <div class="space-y-1">
-                            <label class="text-gray-400">Ask Gap (상한 여유)</label>
-                            <input type="number" id="micro-gap-input" min="0.00000001" max="0.00001" step="0.00000001" value="0.00000005"
-                                   class="w-full bg-white/5 border border-white/10 rounded-lg px-2 py-1.5 text-center text-emerald-400 font-bold focus:border-emerald-500 outline-none">
-                        </div>
-                        <div class="space-y-1">
-                            <label class="text-gray-400">Band Width (변동폭)</label>
-                            <input type="number" id="micro-width-input" min="0.00000001" max="0.00001" step="0.00000001" value="0.00000040"
-                                   class="w-full bg-white/5 border border-white/10 rounded-lg px-2 py-1.5 text-center text-emerald-400 font-bold focus:border-emerald-500 outline-none">
-                        </div>
-                    </div>
-                    <p class="text-[10px] text-gray-500 italic">호가창 최저 매도호가 바로 밑 소수점 7째자리 폭에서 자연스럽게 거래합니다.</p>
+                    <p class="text-[10px] text-gray-400 leading-tight">
+                        선매도 발주 ➔ 오더북 최저가 검증 ➔ 후매수 스윕으로 외부 매도벽을 사지 않고 1:1 완벽 자전거래합니다.
+                    </p>
                 </div>
 
-                <!-- Auto Pause Control -->
-                <div class="space-y-4 pt-4 border-t border-white/10">
-                    <div class="flex justify-between items-center">
-                        <label class="text-sm font-bold text-gray-300">Auto Pause</label>
-                        <label class="relative inline-flex items-center cursor-pointer">
-                            <input type="checkbox" id="auto-pause-toggle" class="sr-only peer">
-                            <div class="w-9 h-5 bg-white/10 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-gray-300 after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-emerald-500"></div>
-                        </label>
-                    </div>
-                    <div class="grid grid-cols-2 gap-2 text-xs">
-                        <div class="space-y-1">
-                            <label class="text-gray-400">Run (Min)</label>
-                            <input type="number" id="run-duration-input" min="1" max="1440" value="120"
-                                   class="w-full bg-white/5 border border-white/10 rounded-lg px-2 py-1.5 text-center text-white focus:border-emerald-500 outline-none">
-                        </div>
-                        <div class="space-y-1">
-                            <label class="text-gray-400">Pause (Min)</label>
-                            <input type="number" id="pause-duration-input" min="1" max="1440" value="30"
-                                   class="w-full bg-white/5 border border-white/10 rounded-lg px-2 py-1.5 text-center text-white focus:border-emerald-500 outline-none">
-                        </div>
-                    </div>
-                </div>
+                <!-- Auto Loop Settings -->
+                <div class="space-y-4 pt-2">
+                    <h3 class="text-sm font-bold text-gray-200">자동 연속 거래 설정</h3>
 
-                <div class="pt-6 border-t border-white/10 text-center">
-                    <button onclick="updateParams()" class="w-full bg-emerald-500 hover:bg-emerald-400 text-black font-bold py-3 rounded-2xl transition-all">
-                        APPLY SETTINGS
+                    <!-- Interval Control -->
+                    <div class="space-y-2">
+                        <div class="flex justify-between text-xs">
+                            <span class="text-gray-300">거래 주기 (초)</span>
+                            <span id="interval-val" class="text-emerald-400 font-bold">5s</span>
+                        </div>
+                        <input type="range" id="interval-range" min="1" max="60" step="1" value="5" 
+                               class="w-full h-1.5 bg-white/10 rounded-lg appearance-none cursor-pointer accent-emerald-400">
+                    </div>
+
+                    <!-- Auto Pause Control -->
+                    <div class="pt-2 border-t border-white/10 space-y-2">
+                        <div class="flex justify-between items-center">
+                            <label class="text-xs font-bold text-gray-300">자동 일시정지 (Auto Pause)</label>
+                            <label class="relative inline-flex items-center cursor-pointer">
+                                <input type="checkbox" id="auto-pause-toggle" class="sr-only peer">
+                                <div class="w-8 h-4 bg-white/10 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-gray-300 after:border-gray-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-emerald-500"></div>
+                            </label>
+                        </div>
+                        <div class="grid grid-cols-2 gap-2 text-xs">
+                            <div>
+                                <label class="text-[10px] text-gray-400">운영 (분)</label>
+                                <input type="number" id="run-duration-input" min="1" max="1440" value="120"
+                                       class="w-full bg-white/5 border border-white/10 rounded-lg px-2 py-1 text-center text-white focus:border-emerald-500 outline-none">
+                            </div>
+                            <div>
+                                <label class="text-[10px] text-gray-400">정지 (분)</label>
+                                <input type="number" id="pause-duration-input" min="1" max="1440" value="30"
+                                       class="w-full bg-white/5 border border-white/10 rounded-lg px-2 py-1 text-center text-white focus:border-emerald-500 outline-none">
+                            </div>
+                        </div>
+                    </div>
+
+                    <button onclick="updateParams()" class="w-full bg-white/10 hover:bg-white/20 text-white font-semibold py-2.5 rounded-xl transition-all text-xs border border-white/10">
+                        설정 저장 및 적용
                     </button>
-                    <p class="text-[10px] mt-4 text-gray-500">Settings are pushed instantly to the running bot instance.</p>
                 </div>
             </div> <!-- End Controls -->
         </div> <!-- End Grid Layout -->
@@ -511,10 +508,84 @@
             fetchStatus();
         }
 
+        let latestOrderbook = null;
+
+        async function fetchOrderbook() {
+            try {
+                const res = await fetch('/api/orderbook');
+                const data = await res.json();
+                latestOrderbook = data;
+                
+                document.getElementById('ob-best-bid').innerText = data.best_bid ? data.best_bid.toFixed(8) : '--';
+                document.getElementById('ob-best-ask').innerText = data.best_ask ? data.best_ask.toFixed(8) : '--';
+                
+                if (data.best_bid && data.best_ask && data.best_bid > 0) {
+                    const pct = ((data.best_ask - data.best_bid) / data.best_bid * 100).toFixed(1);
+                    document.getElementById('spread-pct').innerText = `이격 ${pct}%`;
+                    document.getElementById('safe-range-display').innerText = `${data.min_sweep.toFixed(8)} ~ ${data.max_sweep.toFixed(8)}`;
+                }
+
+                // If manual input is empty, auto-populate with mid price
+                const manualInput = document.getElementById('manual-price-input');
+                if (manualInput && !manualInput.value && data.mid_sweep) {
+                    manualInput.value = data.mid_sweep.toFixed(8);
+                }
+            } catch (err) { console.error('Error fetching orderbook:', err); }
+        }
+
+        function setRecommendedPrice() {
+            if (latestOrderbook && latestOrderbook.mid_sweep) {
+                document.getElementById('manual-price-input').value = latestOrderbook.mid_sweep.toFixed(8);
+            }
+        }
+
+        async function triggerManualSweep() {
+            const btn = document.getElementById('manual-sweep-btn');
+            const originalText = btn.innerHTML;
+            btn.innerHTML = '<span>⏳</span> 스윕 실행 중...';
+            btn.disabled = true;
+
+            const price = parseFloat(document.getElementById('manual-price-input').value) || 0;
+            const amount_usdt = parseFloat(document.getElementById('manual-usdt-input').value) || 15.0;
+
+            try {
+                const res = await fetch('/api/manual_sweep', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ price, amount_usdt })
+                });
+                const result = await res.json();
+                if (result.status === 'success') {
+                    alert(`✅ [스윕 체결 성공]\n체결 가격: ${result.price.toFixed(8)}\n수량: ${result.amount.toLocaleString()} AIR ($${result.usdt.toFixed(1)})\n\n100% 자가 맞체결 완료 (USDT 손실 0%)`);
+                } else {
+                    alert(`⚠️ [스윕 실패 / 안전 방어 발동]\n${result.message}`);
+                }
+                fetchStatus();
+                fetchLogs();
+                fetchOrderbook();
+            } catch (err) {
+                alert('요청 중 오류 발생: ' + err);
+            } finally {
+                btn.innerHTML = originalText;
+                btn.disabled = false;
+            }
+        }
+
+        async function cancelAllOrders() {
+            if (!confirm('현재 계정의 모든 미체결 주문을 즉시 취소하시겠습니까?')) return;
+            try {
+                const res = await fetch('/api/cancel_all', { method: 'POST' });
+                const result = await res.json();
+                alert(`🧹 ${result.cancelled_count}개의 미체결 주문이 모두 취소되었습니다.\n가용 USDT: ${result.usdt_bal.toFixed(4)}`);
+                fetchStatus();
+                fetchLogs();
+                fetchOrderbook();
+            } catch (err) {
+                alert('주문 취소 실패: ' + err);
+            }
+        }
+
         // Live ranges
-        document.getElementById('beta-range').addEventListener('input', (e) => {
-            document.getElementById('beta-val').innerText = e.target.value;
-        });
         document.getElementById('interval-range').addEventListener('input', (e) => {
             document.getElementById('interval-val').innerText = e.target.value + 's';
         });
@@ -522,8 +593,10 @@
         // Intervals
         setInterval(() => { if(currentTab === 'dashboard') fetchStatus(); }, 3000);
         setInterval(() => { if(currentTab === 'dashboard') fetchLogs(); }, 2000);
+        setInterval(() => { if(currentTab === 'dashboard') fetchOrderbook(); }, 2000);
         fetchStatus();
         fetchLogs();
+        fetchOrderbook();
     </script>
 </body>
 </html>

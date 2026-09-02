@@ -284,6 +284,108 @@ class MarketMaker:
             for o in orders:
                 self.cancel_order(o["id"], symbol)
             time.sleep(0.3)
+        return len(orders) if orders else 0
+
+    def execute_manual_sweep(self, sweep_price: float = None, usdt_amount: float = 15.0) -> dict:
+        """
+        수동 1회 즉시 스윕 거래 실행 (100% 선매도 + 오더북 최저가 검증 + 후매수 스윕)
+        """
+        symbol = self.config.symbol
+        ob = self.get_orderbook(symbol)
+        bids = ob.get('bids', []) if ob else []
+        asks = ob.get('asks', []) if ob else []
+        
+        if not bids or not asks:
+            return {"status": "error", "message": "오더북 데이터를 불러올 수 없습니다."}
+            
+        best_bid = float(bids[0][0])
+        best_ask = float(asks[0][0])
+        spread = best_ask - best_bid
+        
+        if spread <= 0.00000002:
+            return {"status": "error", "message": f"스프레드가 너무 좁습니다: {spread:.8f}"}
+
+        margin = max(0.00000002, spread * 0.04)
+        min_sweep = round(best_bid + margin, 8)
+        max_sweep = round(best_ask - margin, 8)
+        
+        if sweep_price is None or sweep_price <= 0:
+            sweep_price = round((min_sweep + max_sweep) / 2.0, 8)
+        else:
+            sweep_price = round(sweep_price, 8)
+            
+        # ⚠️ 매수벽 < 스윕가 < 매도벽 사이 엄격 검증
+        if not (best_bid < sweep_price < best_ask):
+            return {
+                "status": "error",
+                "message": f"가격 오류: 스윕 가격({sweep_price:.8f})은 매수벽({best_bid:.8f})과 매도벽({best_ask:.8f}) 사이에 위치해야 합니다."
+            }
+
+        # 잔고 확인
+        balances = self.get_balances()
+        if balances:
+            self.air_bal = float(balances.get("AIR", {}).get("available", "0"))
+            self.usdt_bal = float(balances.get("USDT", {}).get("available", "0"))
+
+        if self.usdt_bal < 10.0:
+            return {"status": "error", "message": f"가용 USDT가 10달러 미만입니다 ({self.usdt_bal:.2f} USDT)."}
+
+        wash_usdt = max(10.0, min(float(usdt_amount), self.usdt_bal * 0.95))
+        wash_air = round(wash_usdt / sweep_price, 3)
+        p_str = "{:.8f}".format(sweep_price)
+        amt_str = "{:.3f}".format(wash_air)
+
+        # 1) 선매도 주문 발주
+        res_sell = self.private_post("/api/v1/private/trade/limit", {
+            "market": symbol,
+            "side": 1,
+            "price": p_str,
+            "amount": amt_str
+        })
+        sell_id = res_sell.get("result", {}).get("id") if (res_sell and res_sell.get("code") == 0) else None
+        
+        if not sell_id:
+            return {"status": "error", "message": f"선매도 발주 실패: {res_sell}"}
+
+        # 2) 🛡️ 매수 전 오더북 최저 매도가 단독 검증
+        ob_check = self.get_orderbook(symbol)
+        asks_check = ob_check.get('asks', []) if ob_check else []
+        if not asks_check:
+            self.cancel_order(sell_id, symbol)
+            return {"status": "error", "message": "오더북 재확인 실패로 매수를 취소했습니다."}
+
+        lowest_ask_now = float(asks_check[0][0])
+        if lowest_ask_now < (sweep_price - 0.000000001):
+            self.cancel_order(sell_id, symbol)
+            return {"status": "error", "message": f"외부 매도 침범 감지: 최저매도가({lowest_ask_now:.8f})가 스윕가보다 낮아 취소했습니다."}
+
+        # 3) 후매수 발주 (100% 자가 체결)
+        res_buy = self.private_post("/api/v1/private/trade/limit", {
+            "market": symbol,
+            "side": 2,
+            "price": p_str,
+            "amount": amt_str
+        })
+        buy_id = res_buy.get("result", {}).get("id") if (res_buy and res_buy.get("code") == 0) else None
+
+        time.sleep(0.2)
+
+        # 4) 잔여 취소
+        if sell_id:
+            self.cancel_order(sell_id, symbol)
+        if buy_id:
+            self.cancel_order(buy_id, symbol)
+
+        self.log(f"⚡ [수동 스윕 성공] 매수벽: {best_bid:.8f} | 매도벽: {best_ask:.8f} | 체결가: {p_str} | {amt_str} AIR (${wash_usdt:.1f})")
+        return {
+            "status": "success",
+            "price": sweep_price,
+            "amount": wash_air,
+            "usdt": wash_usdt,
+            "best_bid": best_bid,
+            "best_ask": best_ask,
+            "message": f"스윕 체결 완료: {p_str} (${wash_usdt:.1f})"
+        }
 
     def maintain_floor_bids(self, symbol):
         # 호가창에 노출 주문을 남기지 않고 스프레드 내부 스윕핑만 실행합니다.
