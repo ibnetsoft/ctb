@@ -449,7 +449,8 @@ class MarketMaker:
                     amt_str = "{:.3f}".format(wash_air)
 
                     # 4. 스프레드 내부 1:1 선(先)매도 후(後)매수 즉시 맞체결
-                    # [규칙: 절대 먼저 매수하지 않고, 100% 선(先)매도 성공 확인 후에만 매수 스윕]
+                    # [규칙: 절대 먼저 매수하지 않고, 100% 선(先)매도 성공 + 최저매도호가 단독 검증 완료 후에만 매수]
+                    
                     # 1) 본인 매도 주문을 스프레드 사이에 올림 (best_bid보다 높아 외부 매수자 체결 불가)
                     res_sell = self.private_post("/api/v1/private/trade/limit", {
                         "market": symbol,
@@ -464,9 +465,29 @@ class MarketMaker:
                         self.log(f"⚠️ 선매도 발주 실패로 매수 스윕을 안전하게 취소합니다: {res_sell}")
                         time.sleep(2)
                         continue
+
+                    # 2) 🛡️ [핵심 방어막] 매수 주문 전 오더북 최저 매도가 단독 검증
+                    # 방금 올린 본인 매도 주문(sweep_price)이 거래소 전체에서 가장 싼 최저 매도가인지 실시간 확인
+                    ob_check = self.get_orderbook(symbol)
+                    asks_check = ob_check.get('asks', []) if ob_check else []
                     
-                    # 2) 선매도 확인 완료 -> 0.02초 내에 동일 가격 및 수량으로 본인 매수 발주 -> 방금 올린 본인 매도와 100% 즉시 체결
-                    time.sleep(0.02)
+                    if not asks_check:
+                        self.cancel_order(sell_id, symbol)
+                        self.log("⚠️ 오더북 재확인 실패로 매수를 중단하고 선매도를 취소합니다.")
+                        time.sleep(1)
+                        continue
+                        
+                    lowest_ask_now = float(asks_check[0][0])
+                    
+                    # 만약 최저 매도가가 내 매도 가격(sweep_price)보다 낮다면 (외부인이 더 싼 가격에 매도를 던진 경우)
+                    # 절대 매수 주문을 내지 않고, 내 선매도 주문을 즉시 취소하여 USDT를 100% 보호!
+                    if lowest_ask_now < (sweep_price - 0.000000001):
+                        self.cancel_order(sell_id, symbol)
+                        self.log(f"🚨 [외부 매도 침범 감지] 최저매도가({lowest_ask_now:.8f})가 본인선매도가({sweep_price:.8f})보다 낮습니다! 매수를 즉시 중단하고 선매도를 회수합니다.")
+                        time.sleep(2)
+                        continue
+                    
+                    # 3) 100% 단독 최저 매도가 확인 완료 -> 동일 가격 및 수량으로 본인 매수 발주 -> 방금 올린 본인 매도와 100% 즉시 체결
                     res_buy = self.private_post("/api/v1/private/trade/limit", {
                         "market": symbol,
                         "side": 2, # Buy (후매수)
@@ -477,7 +498,7 @@ class MarketMaker:
                     
                     time.sleep(0.2)
                     
-                    # 3) 미체결 잔여 물량 즉시 취소 (호가창에 주문을 남기지 않음)
+                    # 4) 미체결 잔여 물량 즉시 취소 (호가창에 주문을 남기지 않음)
                     if sell_id:
                         self.cancel_order(sell_id, symbol)
                     if buy_id:
