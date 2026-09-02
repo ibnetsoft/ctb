@@ -160,33 +160,31 @@
                     <p class="text-[10px] text-gray-500 italic">Sets the target price for the bot to trade (e.g. 0.00001500).</p>
                 </div>
 
-                <!-- Price Oscillation (Wave) Control -->
+                <!-- Micro Organic Trading Control -->
                 <div class="space-y-4 pt-4 border-t border-white/10">
                     <div class="flex justify-between items-center">
-                        <label class="text-sm font-bold text-gray-300">Price Wave (진동 모드)</label>
+                        <div>
+                            <label class="text-sm font-bold text-gray-300">Micro Organic Mode</label>
+                            <p class="text-[10px] text-gray-500">최저 매도 하단 7째자리 미세 거래</p>
+                        </div>
                         <label class="relative inline-flex items-center cursor-pointer">
-                            <input type="checkbox" id="price-oscillation-toggle" class="sr-only peer">
+                            <input type="checkbox" id="micro-range-toggle" class="sr-only peer" checked>
                             <div class="w-9 h-5 bg-white/10 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-gray-300 after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-emerald-500"></div>
                         </label>
                     </div>
                     <div class="grid grid-cols-2 gap-2 text-xs">
                         <div class="space-y-1">
-                            <label class="text-gray-400">Min Price</label>
-                            <input type="number" id="price-min-input" min="0.00000001" max="1.0" step="0.00000001" value="0.00001000"
+                            <label class="text-gray-400">Ask Gap (상한 여유)</label>
+                            <input type="number" id="micro-gap-input" min="0.00000001" max="0.00001" step="0.00000001" value="0.00000005"
                                    class="w-full bg-white/5 border border-white/10 rounded-lg px-2 py-1.5 text-center text-emerald-400 font-bold focus:border-emerald-500 outline-none">
                         </div>
                         <div class="space-y-1">
-                            <label class="text-gray-400">Max Price</label>
-                            <input type="number" id="price-max-input" min="0.00000001" max="1.0" step="0.00000001" value="0.00002000"
+                            <label class="text-gray-400">Band Width (변동폭)</label>
+                            <input type="number" id="micro-width-input" min="0.00000001" max="0.00001" step="0.00000001" value="0.00000040"
                                    class="w-full bg-white/5 border border-white/10 rounded-lg px-2 py-1.5 text-center text-emerald-400 font-bold focus:border-emerald-500 outline-none">
                         </div>
                     </div>
-                    <div class="space-y-1 text-xs">
-                        <label class="text-gray-400">Step Size (USDT)</label>
-                        <input type="number" id="price-step-input" min="0.00000001" max="0.0001" step="0.00000001" value="0.00000050"
-                               class="w-full bg-white/5 border border-white/10 rounded-lg px-2 py-1.5 text-center text-white focus:border-emerald-500 outline-none">
-                    </div>
-                    <p class="text-[10px] text-gray-500 italic">0.00001000 ~ 0.00002000 구간을 스텝 단위로 왕복 진동합니다.</p>
+                    <p class="text-[10px] text-gray-500 italic">호가창 최저 매도호가 바로 밑 소수점 7째자리 폭에서 자연스럽게 거래합니다.</p>
                 </div>
 
                 <!-- Auto Pause Control -->
@@ -400,14 +398,14 @@
                     const priceOscToggle = document.getElementById('price-oscillation-toggle');
                     if (priceOscToggle) priceOscToggle.checked = data.price_oscillation_enabled;
 
-                    const priceMinInput = document.getElementById('price-min-input');
-                    if (priceMinInput && data.price_min) priceMinInput.value = data.price_min.toFixed(8);
+                    const microRangeToggle = document.getElementById('micro-range-toggle');
+                    if (microRangeToggle && data.micro_range_enabled !== undefined) microRangeToggle.checked = data.micro_range_enabled;
 
-                    const priceMaxInput = document.getElementById('price-max-input');
-                    if (priceMaxInput && data.price_max) priceMaxInput.value = data.price_max.toFixed(8);
+                    const microGapInput = document.getElementById('micro-gap-input');
+                    if (microGapInput && data.micro_gap) microGapInput.value = data.micro_gap.toFixed(8);
 
-                    const priceStepInput = document.getElementById('price-step-input');
-                    if (priceStepInput && data.price_step) priceStepInput.value = data.price_step.toFixed(8);
+                    const microWidthInput = document.getElementById('micro-width-input');
+                    if (microWidthInput && data.micro_width) microWidthInput.value = data.micro_width.toFixed(8);
                     
                     const autoPauseToggle = document.getElementById('auto-pause-toggle');
                     if (autoPauseToggle) autoPauseToggle.checked = data.auto_pause_enabled;
@@ -496,10 +494,9 @@
             const beta = document.getElementById('beta-range').value;
             const interval = document.getElementById('interval-range').value;
             const target_price = document.getElementById('target-price-input').value;
-            const price_oscillation_enabled = document.getElementById('price-oscillation-toggle').checked;
-            const price_min = document.getElementById('price-min-input').value;
-            const price_max = document.getElementById('price-max-input').value;
-            const price_step = document.getElementById('price-step-input').value;
+            const micro_range_enabled = document.getElementById('micro-range-toggle') ? document.getElementById('micro-range-toggle').checked : true;
+            const micro_gap = document.getElementById('micro-gap-input') ? document.getElementById('micro-gap-input').value : 0.00000005;
+            const micro_width = document.getElementById('micro-width-input') ? document.getElementById('micro-width-input').value : 0.00000040;
             const auto_pause_enabled = document.getElementById('auto-pause-toggle').checked;
             const run_duration = document.getElementById('run-duration-input').value;
             const pause_duration = document.getElementById('pause-duration-input').value;
@@ -507,7 +504,7 @@
             await fetch('/api/config', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ beta, interval, target_price, price_oscillation_enabled, price_min, price_max, price_step, auto_pause_enabled, run_duration, pause_duration })
+                body: JSON.stringify({ beta, interval, target_price, micro_range_enabled, micro_gap, micro_width, auto_pause_enabled, run_duration, pause_duration })
             });
             alert('Settings Applied!');
             isInitialized = false;

@@ -25,8 +25,11 @@ class BotConfig:
         self.is_running = True
         self.anchor_reset_interval = 120
         self.logs = []
-        self.target_price = 0.000015
-        self.price_oscillation_enabled = True
+        self.target_price = 0.00001035
+        self.micro_range_enabled = True
+        self.micro_gap = 0.00000005
+        self.micro_width = 0.00000040
+        self.price_oscillation_enabled = False
         self.price_min = 0.00001
         self.price_max = 0.00002
         self.price_step = 0.0000005
@@ -47,6 +50,9 @@ class BotConfig:
                     self.telegram_chat_id = data.get("telegram_chat_id", self.telegram_chat_id)
                     self.telegram_enabled = data.get("telegram_enabled", self.telegram_enabled)
                     self.target_price = float(data.get("target_price", self.target_price))
+                    self.micro_range_enabled = bool(data.get("micro_range_enabled", self.micro_range_enabled))
+                    self.micro_gap = float(data.get("micro_gap", self.micro_gap))
+                    self.micro_width = float(data.get("micro_width", self.micro_width))
                     self.price_oscillation_enabled = bool(data.get("price_oscillation_enabled", self.price_oscillation_enabled))
                     self.price_min = float(data.get("price_min", self.price_min))
                     self.price_max = float(data.get("price_max", self.price_max))
@@ -65,6 +71,9 @@ class BotConfig:
             "telegram_chat_id": self.telegram_chat_id,
             "telegram_enabled": self.telegram_enabled,
             "target_price": self.target_price,
+            "micro_range_enabled": self.micro_range_enabled,
+            "micro_gap": self.micro_gap,
+            "micro_width": self.micro_width,
             "price_oscillation_enabled": self.price_oscillation_enabled,
             "price_min": self.price_min,
             "price_max": self.price_max,
@@ -95,6 +104,7 @@ class MarketMaker:
         self.last_status = "Initializing..."
         self.active_wash_buy_id = None
         self.last_grid_target_price = 0.0
+        self.current_organic_price = 0.0
         
         self.price_step_direction = 1 # 1: UP, -1: DOWN
         # 0.00000990 부터 0.00000850 까지 15단계 바닥 매수벽 가격 리스트
@@ -118,13 +128,13 @@ class MarketMaker:
         timestamp = datetime.now().strftime("%H:%M:%S")
         full_msg = f"[{timestamp}] {message}"
         try:
-            print(full_msg)
+            print(full_msg, flush=True)
         except UnicodeEncodeError:
             try:
                 encoding = sys.stdout.encoding or 'utf-8'
-                print(full_msg.encode(encoding, errors='replace').decode(encoding))
+                print(full_msg.encode(encoding, errors='replace').decode(encoding), flush=True)
             except:
-                print(f"[{timestamp}] [Log] " + message.encode('ascii', errors='replace').decode('ascii'))
+                print(f"[{timestamp}] [Log] " + message.encode('ascii', errors='replace').decode('ascii'), flush=True)
         self.config.logs.append(full_msg)
         if len(self.config.logs) > 100:
             self.config.logs.pop(0)
@@ -270,7 +280,8 @@ class MarketMaker:
     def maintain_floor_bids(self, symbol):
         """
         0.00000990 부터 0.00000850 까지 15단계 바닥 매수벽을 설치 및 유지합니다.
-        각 호가당 11.0 USDT 규모 (Biconomy 최소 주문 요건 충족).
+        자전 거래용 가용 자금(최소 45.0 USDT)을 항상 보존하면서, 
+        상위 바닥 호가(0.00000990부터 순서대로)부터 우선 배치합니다.
         """
         open_orders = self.get_open_orders(symbol)
         open_buy_orders = [o for o in open_orders if o.get('side') == 2 or o.get('side') == '2']
@@ -281,17 +292,20 @@ class MarketMaker:
         missing_floor_prices = [p for p in self.floor_bid_prices if p not in existing_buy_prices]
         
         if missing_floor_prices:
-            self.log(f"🛡️ [바닥 매수벽 점검] 누락된 바닥 호가 {len(missing_floor_prices)}개를 설치합니다.")
-            floor_order_usdt = 11.0
+            # 0.00000990 (가장 높은 가격)부터 우선 설치되도록 정렬
+            missing_floor_prices.sort(reverse=True)
+            floor_order_usdt = 10.5
+            wash_reserve_usdt = 25.0  # 자전거래 연료로 남겨둘 최소 가용 USDT
             
             for p in missing_floor_prices:
-                # 주문 전 잔고 확인: 최소 11.0 USDT 필요
+                # 주문 전 잔고 확인: 자전거래용 예비금 + 주문금액 필요
                 balances = self.get_balances()
                 if balances:
                     self.usdt_bal = float(balances.get("USDT", {}).get("available", "0"))
                     self.air_bal = float(balances.get("AIR", {}).get("available", "0"))
-                if self.usdt_bal < 11.0:
-                    self.log(f"⚠️ 가용 USDT({self.usdt_bal:.2f})가 부족하여 바닥 매수벽({p:.8f}) 배치를 중단합니다.")
+                    
+                if self.usdt_bal < (wash_reserve_usdt + floor_order_usdt):
+                    # 가용 자전거래 자금을 보존하기 위해 하위 바닥벽 설치는 보류
                     break
                     
                 amt = round(floor_order_usdt / p, 3)
@@ -309,86 +323,56 @@ class MarketMaker:
                 time.sleep(0.15)
 
     def maintain_grid(self, symbol):
-        # 1. 먼저 15단계 바닥 매수벽 점검 및 설치
+        # 1. 15단계 바닥 매수벽 점검 및 설치
         self.maintain_floor_bids(symbol)
         
         open_orders = self.get_open_orders(symbol)
         floor_prices_set = set(self.floor_bid_prices)
         
-        # Filter out active wash buy order and floor bids
-        grid_orders = [o for o in open_orders if o["id"] != self.active_wash_buy_id and round(float(o.get('price', 0)), 8) not in floor_prices_set]
-        
-        buy_orders = [o for o in grid_orders if o.get('side') == 2 or o.get('side') == '2']
-        sell_orders = [o for o in grid_orders if o.get('side') == 1 or o.get('side') == '1']
-        
-        # Calculate expected number of dynamic upper grid buy orders
-        wash_reserve = max(35.0, self.usdt_bal * 0.25)
-        grid_usdt = max(0.0, self.usdt_bal - wash_reserve)
-        min_order_usdt = 11.0
-        expected_bids = min(30, int(grid_usdt / min_order_usdt))
-        
-        target_price = self.config.target_price
-        need_rebuild = False
-        if abs(getattr(self, 'last_grid_target_price', 0.0) - target_price) > 1e-8:
-            self.log(f"🎯 타겟 가격 변경 감지 ({getattr(self, 'last_grid_target_price', 0.0):.8f} -> {target_price:.8f}) 상단 그리드를 재구축합니다.")
-            need_rebuild = True
-        elif len(sell_orders) < 25:
-            self.log(f"⚠️ 매도 호가(Asks) 개수 부족 ({len(sell_orders)}/30) 상단 그리드를 재구축합니다.")
-            need_rebuild = True
-        elif expected_bids > 0 and len(buy_orders) < max(1, expected_bids - 3):
-            self.log(f"⚠️ 상단 매수 호가(Bids) 개수 부족 ({len(buy_orders)}/{expected_bids}) 상단 그리드를 재구축합니다.")
-            need_rebuild = True
-            
-        if need_rebuild:
-            self.log("🧹 기존 상단 그리드 주문만 취소합니다. (바닥 매수벽은 보존)")
-            for o in grid_orders:
+        # 2. 매도벽(Asks)은 외부에 의해 충분하므로 봇은 일체 생성하지 않음 -> 잔여 매도 주문이 있으면 정리
+        sell_orders = [o for o in open_orders if o.get('side') == 1 or o.get('side') == '1']
+        if sell_orders:
+            self.log(f"🧹 [매도벽 미생성 정책] 기존 봇 매도 주문 {len(sell_orders)}개를 정리합니다.")
+            for o in sell_orders:
                 self.cancel_order(o["id"], symbol)
             time.sleep(0.5)
             
-            # Refresh balances
-            balances = self.get_balances()
-            if balances:
-                self.air_bal = float(balances.get("AIR", {}).get("available", "0"))
-                self.usdt_bal = float(balances.get("USDT", {}).get("available", "0"))
-                
+        # 3. 상단 매수벽(Bids) 관리: 여유 USDT가 있을 경우만 타겟 가격 하단에 배치
+        grid_buy_orders = [o for o in open_orders if (o.get('side') == 2 or o.get('side') == '2') and o["id"] != self.active_wash_buy_id and round(float(o.get('price', 0)), 8) not in floor_prices_set]
+        
+        wash_reserve = 35.0
+        grid_usdt = max(0.0, self.usdt_bal - wash_reserve)
+        min_order_usdt = 11.0
+        expected_bids = min(15, int(grid_usdt / min_order_usdt))
+        
+        target_price = self.config.target_price
+        need_rebuild = False
+        if abs(getattr(self, 'last_grid_target_price', 0.0) - target_price) > 0.00000200:
+            need_rebuild = True
+        elif expected_bids > 0 and len(grid_buy_orders) < max(1, expected_bids - 2):
+            need_rebuild = True
+            
+        if need_rebuild and expected_bids > 0:
+            for o in grid_buy_orders:
+                self.cancel_order(o["id"], symbol)
+            time.sleep(0.3)
             self.place_new_grid(symbol)
 
     def place_new_grid(self, symbol):
         target_price = self.config.target_price
         self.last_grid_target_price = target_price
         
-        self.log(f"🧱 [상단 그리드 구축 시작] 타겟 가격: {target_price:.8f}")
+        # 매도벽(Asks)은 일체 생성하지 않음!
         
-        # 1. Place 30 Sell Grid Orders (Asks)
-        # Price range: target_price * 1.001 to target_price * 1.020
-        # Each ask size: 50.0 USDT (so total ask depth in top 20 is > 1000 USDT)
-        ask_order_usdt = 50.0
-        for i in range(30):
-            p_ask = target_price * (1.001 + (1.020 - 1.001) * i / 29.0)
-            amt_ask = ask_order_usdt / p_ask
-            
-            # Format to tick sizes
-            p_str = "{:.8f}".format(p_ask)
-            amt_str = "{:.3f}".format(amt_ask)
-            
-            self.private_post("/api/v1/private/trade/limit", {
-                "market": symbol,
-                "side": 1, # Sell
-                "price": p_str,
-                "amount": amt_str
-            })
-            time.sleep(0.15)
-            
-        # 2. Place Dynamic Upper Bid Grid Orders (Bids)
-        wash_reserve = max(35.0, self.usdt_bal * 0.25)
+        # 상단 매수벽 (Bids) 배치 (가용 USDT 여유분으로만 배치)
+        wash_reserve = 35.0
         grid_usdt = max(0.0, self.usdt_bal - wash_reserve)
         min_order_usdt = 11.0
-        num_bids = min(30, int(grid_usdt / min_order_usdt))
+        num_bids = min(15, int(grid_usdt / min_order_usdt))
         
         if num_bids > 0:
-            self.log(f"🟢 [상단 매수 그리드 설치] 총 {num_bids}개 매수 주문 배치 (가용 USDT: {grid_usdt:.2f})")
+            self.log(f"🟢 [매수벽 보강] 총 {num_bids}개 매수 주문 배치 (가용 USDT: {grid_usdt:.2f})")
             for i in range(num_bids):
-                # Ensure bids do not go below 0.00001000 (floor bids cover below 0.00000990)
                 min_bid_price = max(0.00001000, target_price * 0.980)
                 max_bid_price = target_price * 0.999
                 
@@ -399,14 +383,7 @@ class MarketMaker:
                 else:
                     p_bid = max_bid_price
                     
-                if num_bids >= 20:
-                    if i < 20:
-                        bid_size_usdt = (grid_usdt * 0.8) / 20.0
-                    else:
-                        bid_size_usdt = (grid_usdt * 0.2) / (num_bids - 20)
-                else:
-                    bid_size_usdt = grid_usdt / num_bids
-                    
+                bid_size_usdt = grid_usdt / num_bids
                 amt_bid = bid_size_usdt / p_bid
                 p_str = "{:.8f}".format(p_bid)
                 amt_str = "{:.3f}".format(amt_bid)
@@ -418,8 +395,6 @@ class MarketMaker:
                     "amount": amt_str
                 })
                 time.sleep(0.15)
-        else:
-            self.log("⏳ [상단 매수 그리드 스킵] 가용 USDT가 바닥벽 및 자전 예비금으로 할당되어 상단 매수 그리드를 스킵합니다.")
 
     def run_mm_loop(self):
         symbol = self.config.symbol
@@ -502,163 +477,133 @@ class MarketMaker:
                             self.send_telegram(f"⏳ [자동 일시정지] 설정된 운영 시간({self.config.run_duration}분) 경과. {self.config.pause_duration}분간 정지합니다.")
                             break
 
-                    # 가격 진동 모드(Wave Mode) 계산: 0.00001000 ~ 0.00002000 왕복
-                    if self.config.price_oscillation_enabled:
-                        p_min = self.config.price_min
-                        p_max = self.config.price_max
-                        p_step = self.config.price_step
-                        
-                        if self.config.target_price < p_min:
-                            self.config.target_price = p_min
-                            self.price_step_direction = 1
-                        elif self.config.target_price > p_max:
-                            self.config.target_price = p_max
-                            self.price_step_direction = -1
+                    # 최저 매도호가 하단 소수점 7째자리 미세구간 유기적 가격 결정
+                    ob = self.get_orderbook(symbol)
+                    fresh_asks = ob.get('asks', []) if ob else []
+                    
+                    if self.config.micro_range_enabled:
+                        # 1. 호가창의 최저 매도호가 확인
+                        if fresh_asks:
+                            lowest_ask = float(fresh_asks[0][0])
                         else:
-                            next_p = round(self.config.target_price + (self.price_step_direction * p_step), 8)
-                            if next_p >= p_max:
-                                next_p = p_max
-                                self.price_step_direction = -1
-                            elif next_p <= p_min:
-                                next_p = p_min
-                                self.price_step_direction = 1
-                            self.config.target_price = next_p
+                            lowest_ask = max(0.00001050, self.config.target_price + 0.00000050)
+                            
+                        # 2. 거래 상한선: 최저 매도호가 바로 아래 (매도벽을 긁지 않도록 고정)
+                        ceiling_price = round(lowest_ask - self.config.micro_gap, 8)
+                        # 3. 거래 하한선: 상한선 대비 소수점 7째자리 작은 폭 아래 (바닥벽 0.00001005 이상 보장)
+                        floor_price = round(max(0.00001005, ceiling_price - self.config.micro_width), 8)
                         
-                        self.target_mid = self.config.target_price
-                        dir_str = "상승 ↗️" if self.price_step_direction == 1 else "하강 ↘️"
-                        self.log(f"🌊 [가격 진동] 현재 거래 가격: {self.config.target_price:.8f} (방향: {dir_str}, 범위: {p_min:.8f} ~ {p_max:.8f})")
+                        if ceiling_price <= floor_price:
+                            ceiling_price = round(floor_price + 0.00000020, 8)
+                            
+                        # 4. 유기적 미세 랜덤워크 (Mean-Reverting Micro-Jitter)
+                    # 1. 외부 최저 매도호가 실시간 탐지 및 하향 추적
+                    ob = self.get_orderbook(symbol)
+                    fresh_asks = ob.get('asks', []) if ob else []
+                    
+                    if fresh_asks:
+                        lowest_ask = float(fresh_asks[0][0])
+                    else:
+                        lowest_ask = 0.00001000
+                        
+                    # 외부 최저 매도벽보다 항상 micro_gap(기본 0.00000005) 아래 가격으로 결정
+                    # 외부 매도세가 낮아지면 자동으로 target_price도 하향 추적하여 밑에서만 거래
+                    target_price = round(lowest_ask - self.config.micro_gap, 8)
+                    if target_price <= 0.00000100:
+                        target_price = round(lowest_ask * 0.999, 8)
+                        
+                    self.config.target_price = target_price
+                    self.target_mid = target_price
+                    self.log(f"🎯 [외부 매도벽 하단 추적] 외부최저매도: {lowest_ask:.8f} | 자전거래가: {target_price:.8f}")
 
-                    # 그리드 상태 유지 및 재구축
+                    # 2. 매수벽 유지 (매도벽은 일체 생성 안 함)
                     self.maintain_grid(symbol)
 
-                    # 가용 잔고 최신 정보로 갱신 (USDT 잠금 반영)
+                    # 3. 가용 잔고 최신 정보로 갱신
                     balances = self.get_balances()
                     if balances:
                         self.air_bal = float(balances.get("AIR", {}).get("available", "0"))
                         self.usdt_bal = float(balances.get("USDT", {}).get("available", "0"))
 
-                    # 1. 미세 매수벽 (Macro Buy Wall) 크기 결정
-                    # 가용 USDT의 98%를 한 번에 벽으로 세움
-                    macro_wall_usdt = self.usdt_bal * 0.98
+                    # 4. USDT 부족 시 자동 연료 충전 (자가 치유)
                     floor_prices_set = set(self.floor_bid_prices)
-                    
-                    if macro_wall_usdt < 10.0:
-                        self.log("⚠️ USDT가 부족하여 기존 상단 매수 주문(오래된 주문)을 취소하여 자금을 확보합니다.")
+                    if self.usdt_bal < 10.5:
+                        self.log("⚠️ 가용 USDT가 10.5달러 미만이어 자전거래 연료를 긴급 확보합니다.")
                         existing_orders = self.get_open_orders(symbol)
-                        # 매수 주문(side: 2)만 필터링 (바닥 매수벽 및 활성 자전 매수벽 제외)
-                        buy_orders = [o for o in existing_orders if (o.get('side') == 2 or o.get('side') == '2') and o["id"] != self.active_wash_buy_id and round(float(o.get('price', 0)), 8) not in floor_prices_set]
                         
-                        try:
-                            # 오래된 주문이 앞으로 오도록 정렬 (ctime 또는 id 사용)
-                            buy_orders.sort(key=lambda x: float(x.get('ctime', x.get('id', 0))))
-                        except Exception:
-                            try:
-                                buy_orders.sort(key=lambda x: int(x.get('id', 0)))
-                            except Exception:
-                                pass
-                        
-                        cancelled_count = 0
+                        # A. 상단 매수 주문 먼저 취소
+                        buy_orders = [o for o in existing_orders if (o.get('side') == 2 or o.get('side') == '2') and round(float(o.get('price', 0)), 8) not in floor_prices_set]
                         for o in buy_orders:
-                            res_cancel = self.cancel_order(o["id"], symbol)
-                            if res_cancel and res_cancel.get("code") == 0:
-                                cancelled_count += 1
-                                order_price = float(o.get('price', target_price))
-                                order_left = float(o.get('left', 0))
-                                recovered_usdt = order_price * order_left
-                                self.usdt_bal += recovered_usdt
-                                self.log(f"🧹 오래된 상단 매수 주문 취소 완료: ID {o['id']} | 회수된 USDT: {recovered_usdt:.4f}")
-                                
-                                # 가용 USDT 갱신
-                                macro_wall_usdt = self.usdt_bal * 0.98
-                                if macro_wall_usdt >= 15.0:  # 최소 거래 진행이 가능한 잔고 확보 시 중단
-                                    break
-                                time.sleep(0.1)
-                        
-                        # 실제 잔고 재동기화
-                        if cancelled_count > 0:
-                            time.sleep(1) # 취소 반영 대기
-                            balances = self.get_balances()
-                            if balances:
-                                self.air_bal = float(balances.get("AIR", {}).get("available", "0"))
-                                self.usdt_bal = float(balances.get("USDT", {}).get("available", "0"))
-                                macro_wall_usdt = self.usdt_bal * 0.98
-                                self.log(f"🔄 잔고 갱신 완료: 가용 USDT: {self.usdt_bal:.4f} | 가용 AIR: {self.air_bal:.2f}")
-                        
-                        if macro_wall_usdt < 10.0:
-                            self.log("⚠️ 상단 매수벽을 정리했음에도 가용 USDT가 10달러 미만입니다. 자금이 소진되어 이번 주기를 조기 종료합니다.")
-                            cycle_washed_usdt = cycle_target_usdt # 강제로 이번 턴 종료시켜 휴식 진입
-                            break
-                        
-                    # 기존 주문이 너무 많으면 오래된 것부터 정리 (API Limit 방지, 10% 잔여벽들)
-                    existing_orders = self.get_open_orders(symbol)
-                    grid_orders = [o for o in existing_orders if o["id"] != self.active_wash_buy_id and round(float(o.get('price', 0)), 8) not in floor_prices_set]
-                    if len(grid_orders) > 50:
-                        self.log("🧹 상단 미체결 주문이 50개가 넘어 오래된 주문 일부를 정리합니다.")
-                        # 가격이 낮은(오래된) 매수 주문부터 취소
-                        buy_orders = [o for o in grid_orders if o['side'] == 2]
-                        buy_orders.sort(key=lambda x: float(x['price']))
-                        for o in buy_orders[:len(buy_orders)-30]: # 상위 30개만 남기고 취소
                             self.cancel_order(o["id"], symbol)
+                            time.sleep(0.1)
                             
-                    # 2. 타겟 가격 및 매수벽 크기 계산 (8자리 소수점 지원)
-                    target_price = self.config.target_price
-                    macro_wall_air = round(macro_wall_usdt / target_price, 3)
-                    
-                    # 3. 매수벽 설치 (Buy First)
-                    self.log(f"🟢 [매수벽 설치] {target_price:.8f} 에 {macro_wall_air:.3f} AIR (${macro_wall_usdt:.1f}) 매수벽 올림!")
-                    res_buy = self.place_order(symbol, 2, target_price, macro_wall_air)
-                    if not res_buy or res_buy.get("code") != 0:
-                        time.sleep(2)
+                        # B. 최하단 바닥 매수벽 1~3개 임시 회수
+                        balances = self.get_balances()
+                        self.usdt_bal = float(balances.get("USDT", {}).get("available", "0")) if balances else self.usdt_bal
+                        if self.usdt_bal < 10.5:
+                            floor_orders = [o for o in existing_orders if (o.get('side') == 2 or o.get('side') == '2') and round(float(o.get('price', 0)), 8) in floor_prices_set]
+                            floor_orders.sort(key=lambda x: float(x.get('price', 0))) # 0.00000850부터
+                            for fo in floor_orders:
+                                self.cancel_order(fo["id"], symbol)
+                                time.sleep(0.15)
+                                balances = self.get_balances()
+                                self.usdt_bal = float(balances.get("USDT", {}).get("available", "0")) if balances else self.usdt_bal
+                                if self.usdt_bal >= 30.0:
+                                    break
+                                    
+                        time.sleep(0.5)
+                        balances = self.get_balances()
+                        if balances:
+                            self.air_bal = float(balances.get("AIR", {}).get("available", "0"))
+                            self.usdt_bal = float(balances.get("USDT", {}).get("available", "0"))
+                            self.log(f"🔄 잔고 갱신 완료: 가용 USDT: {self.usdt_bal:.4f} | 가용 AIR: {self.air_bal:.2f}")
+
+                    if self.usdt_bal < 10.0:
+                        self.log("⚠️ 가용 USDT가 10달러 미만입니다. 최소 주문 가능 금액 확보를 대기합니다.")
+                        time.sleep(5)
                         continue
-                        
-                    self.active_wash_buy_id = res_buy.get("result", {}).get("id")
-                    self.usdt_bal -= macro_wall_usdt
-                    washed_air = 0.0
-                    target_sell_air = round(macro_wall_air * 0.90, 3) # 90%만 매도하고 10%는 남김
+
+                    # 5. 1:1 원자적(Atomic) 즉시 맞체결 자전거래 (15 USDT 단위)
+                    # 매수와 매도를 동시에 100% 동일 수량으로 내어 외부 매도세 침범을 원천 차단
+                    wash_usdt = min(15.0, max(10.5, self.usdt_bal * 0.90))
+                    wash_air = round(wash_usdt / target_price, 3)
                     
-                    # 4. 분할 매도 루프 (약 15달러 단위)
-                    while washed_air < target_sell_air:
-                        fresh_ob = self.get_orderbook(symbol)
-                        bids = fresh_ob.get('bids', []) if fresh_ob else []
-                        if bids:
-                            current_best_bid = float(bids[0][0])
-                            total_bid_vol_at_target = sum(float(bid[1]) for bid in bids if abs(float(bid[0]) - target_price) < 1e-7)
-                            my_remaining = macro_wall_air - washed_air
-                            
-                            # 내 매수벽이 타인에게 모두 체결되어 사라졌는지 확인
-                            if current_best_bid < target_price - 1e-7 or total_bid_vol_at_target < 10.0:
-                                self.log(f"🎉/🚨 [물량 소진 감지] 타인이 내 매수벽에 물량을 던졌습니다! (저가 매수 흡수 성공) 다음 턴으로 진행합니다.")
-                                break
-                            
-                        # 매도 금액 결정 (약 15 USDT)
-                        sell_chunk_usdt = random.uniform(14.0, 16.0)
-                        sell_chunk_air = round(sell_chunk_usdt / target_price, 3)
-                        actual_sell_air = round(min(sell_chunk_air, target_sell_air - washed_air), 3)
-                        
-                        if actual_sell_air * target_price < 5.0:
-                            break
-                            
-                        # 매도 주문 실행 (내 매수벽을 때림)
-                        res_sell = self.place_order(symbol, 1, target_price, actual_sell_air)
-                        if res_sell and res_sell.get("code") == 0:
-                            washed_air += actual_sell_air
-                            cycle_washed_usdt += (actual_sell_air * target_price)
-                            self.usdt_bal += (actual_sell_air * target_price) # 자전 매도 성공 시 USDT 잔고 복구
-                            progress = (cycle_washed_usdt / cycle_target_usdt) * 100
-                            self.log(f"💥 [자전 매도] {actual_sell_air:.3f} AIR (${actual_sell_air*target_price:.1f}) 매도 완료 (진행률: {progress:.1f}%)")
-                        else:
-                            break
-                            
-                        time.sleep(random.uniform(2.0, 4.0))
-                        
-                    self.active_wash_buy_id = None
+                    p_str = "{:.8f}".format(target_price)
+                    amt_str = "{:.3f}".format(wash_air)
                     
-                    if immediate_retry:
-                        self.log("🔄 즉시 새로운 최저가격을 스캔하여 다시 턴을 시작합니다.")
-                        break
+                    # 1) 본인 매수 주문 전송
+                    res_buy = self.private_post("/api/v1/private/trade/limit", {
+                        "market": symbol,
+                        "side": 2, # Buy
+                        "price": p_str,
+                        "amount": amt_str
+                    })
+                    buy_id = res_buy.get("result", {}).get("id") if res_buy else None
+                    
+                    # 2) 0.05초 내에 동일 가격 및 수량으로 본인 매도 주문 전송 (100% 자가 체결)
+                    time.sleep(0.05)
+                    res_sell = self.private_post("/api/v1/private/trade/limit", {
+                        "market": symbol,
+                        "side": 1, # Sell
+                        "price": p_str,
+                        "amount": amt_str
+                    })
+                    sell_id = res_sell.get("result", {}).get("id") if res_sell else None
+                    
+                    time.sleep(0.5)
+                    
+                    # 3) 미체결 잔여 물량 즉시 취소 (외부인이 긁어가는 것 방지)
+                    if buy_id:
+                        self.cancel_order(buy_id, symbol)
+                    if sell_id:
+                        self.cancel_order(sell_id, symbol)
                         
-                    # 다음 턴 시작 전 간격 (2~5초)
-                    time.sleep(random.uniform(2.0, 5.0))
+                    cycle_washed_usdt += wash_usdt
+                    progress = (cycle_washed_usdt / cycle_target_usdt) * 100
+                    self.log(f"⚡ [1:1 즉시 자전거래] {p_str} 에 {amt_str} AIR (${wash_usdt:.1f}) 100% 맞체결 완료 (진행률: {progress:.1f}%)")
+                    
+                    # 다음 틱 대기 (2~4초)
+                    time.sleep(random.uniform(2.0, 4.0))
                     
                 # 7. 성공적으로 주기 목표(예: 1000달러)를 마쳤다면 휴식 없이 바로 다음 주기로 넘어감
                 if cycle_washed_usdt >= cycle_target_usdt * 0.95:

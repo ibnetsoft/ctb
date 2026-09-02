@@ -49,6 +49,9 @@ async def get_status():
         "auto_pause_enabled": config.auto_pause_enabled,
         "run_duration": config.run_duration,
         "pause_duration": config.pause_duration,
+        "micro_range_enabled": config.micro_range_enabled,
+        "micro_gap": config.micro_gap,
+        "micro_width": config.micro_width,
         "price_oscillation_enabled": config.price_oscillation_enabled,
         "price_min": config.price_min,
         "price_max": config.price_max,
@@ -67,6 +70,12 @@ async def update_config(data: dict):
     if "target_price" in data:
         config.target_price = float(data["target_price"])
         bot.target_mid = config.target_price
+    if "micro_range_enabled" in data:
+        config.micro_range_enabled = bool(data["micro_range_enabled"])
+    if "micro_gap" in data:
+        config.micro_gap = float(data["micro_gap"])
+    if "micro_width" in data:
+        config.micro_width = float(data["micro_width"])
     if "price_oscillation_enabled" in data:
         config.price_oscillation_enabled = bool(data["price_oscillation_enabled"])
     if "price_min" in data:
@@ -93,6 +102,9 @@ async def get_settings():
         "telegram_chat_id": config.telegram_chat_id,
         "telegram_enabled": config.telegram_enabled,
         "target_price": config.target_price,
+        "micro_range_enabled": config.micro_range_enabled,
+        "micro_gap": config.micro_gap,
+        "micro_width": config.micro_width,
         "price_oscillation_enabled": config.price_oscillation_enabled,
         "price_min": config.price_min,
         "price_max": config.price_max,
@@ -113,6 +125,12 @@ async def save_settings(data: dict):
     if "target_price" in data:
         config.target_price = float(data["target_price"])
         bot.target_mid = config.target_price
+    if "micro_range_enabled" in data:
+        config.micro_range_enabled = bool(data["micro_range_enabled"])
+    if "micro_gap" in data:
+        config.micro_gap = float(data["micro_gap"])
+    if "micro_width" in data:
+        config.micro_width = float(data["micro_width"])
     if "price_oscillation_enabled" in data:
         config.price_oscillation_enabled = bool(data["price_oscillation_enabled"])
     if "price_min" in data:
