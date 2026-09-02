@@ -371,7 +371,7 @@ class MarketMaker:
                             self.log(f"⏳ [자동 일시정지] 설정된 운영 시간({self.config.run_duration}분) 경과.")
                             break
 
-                    # 1. 실시간 오더북의 매수/매도 호가 스캔 (외부 세력의 호가창 감지)
+                    # 1. 매 주문 직전 실시간 오더북(매수벽/매도벽) 정밀 조사
                     ob = self.get_orderbook(symbol)
                     bids = ob.get('bids', []) if ob else []
                     asks = ob.get('asks', []) if ob else []
@@ -381,23 +381,25 @@ class MarketMaker:
                         time.sleep(3)
                         continue
                         
-                    best_bid = float(bids[0][0]) # 외부 최고 매수가 (예: 0.00000552)
-                    best_ask = float(asks[0][0]) # 외부 최저 매도가 (예: 0.00000990)
+                    best_bid = float(bids[0][0]) # 외부 최고 매수가 (매수벽 상단)
+                    best_ask = float(asks[0][0]) # 외부 최저 매도가 (매도벽 하단)
                     
                     spread = best_ask - best_bid
-                    if spread <= 0.00000010:
-                        min_sweep = round(best_bid + 0.00000002, 8)
-                        max_sweep = round(best_ask - 0.00000002, 8)
-                    else:
-                        margin = max(0.00000003, spread * 0.03)
-                        min_sweep = round(best_bid + margin, 8)
-                        max_sweep = round(best_ask - margin, 8)
-                        
+                    if spread <= 0.00000002:
+                        self.log(f"⚠️ 스프레드가 너무 좁아({spread:.8f}) 호가 확장을 대기합니다.")
+                        time.sleep(3)
+                        continue
+
+                    # 매수벽과 매도벽 사이에 안전 마진(이격)을 둔 스윕 가능 구간 산출
+                    margin = max(0.00000002, spread * 0.04)
+                    min_sweep = round(best_bid + margin, 8)
+                    max_sweep = round(best_ask - margin, 8)
+                    
                     if min_sweep >= max_sweep:
                         min_sweep = round((best_bid + best_ask) / 2.0, 8)
                         max_sweep = min_sweep
 
-                    # 2. 매수/매도 금액 사이에서 다이나믹 스윕핑 가격 결정
+                    # 2. 매수/매도 호가 사이에서 다이나믹 스윕핑 가격 결정
                     if not hasattr(self, 'current_sweep_price') or self.current_sweep_price < min_sweep or self.current_sweep_price > max_sweep:
                         self.current_sweep_price = round((min_sweep + max_sweep) / 2.0, 8)
                         self.sweep_direction = 1
@@ -416,6 +418,12 @@ class MarketMaker:
                         
                     self.current_sweep_price = round(next_price, 8)
                     sweep_price = self.current_sweep_price
+
+                    # ⚠️ 이중 방어 검증: 산출된 스윕 가격이 매수벽과 매도벽 사이에 엄격히 위치하는지 확인
+                    if not (best_bid < sweep_price < best_ask):
+                        sweep_price = round((best_bid + best_ask) / 2.0, 8)
+                        self.current_sweep_price = sweep_price
+
                     self.target_mid = sweep_price
                     self.config.target_price = sweep_price
 
@@ -477,7 +485,7 @@ class MarketMaker:
                         
                     cycle_washed_usdt += wash_usdt
                     progress = (cycle_washed_usdt / cycle_target_usdt) * 100
-                    self.log(f"🌊 [스프레드 스윕 체결] 호가범위: {best_bid:.8f} ~ {best_ask:.8f} | 체결가: {p_str} | {amt_str} AIR (${wash_usdt:.1f}) (진행률: {progress:.1f}%)")
+                    self.log(f"🌊 [스프레드 스윕 체결] 매수벽: {best_bid:.8f} | 매도벽: {best_ask:.8f} | 체결가: {p_str} | {amt_str} AIR (${wash_usdt:.1f}) (진행률: {progress:.1f}%)")
                     
                     # 다음 스윕 대기 (1.5 ~ 3.5초)
                     actual_sleep = max(1.0, self.config.interval * random.uniform(0.6, 1.2))
