@@ -279,23 +279,27 @@ class MarketMaker:
 
     def maintain_floor_bids(self, symbol):
         """
-        0.00000990 부터 0.00000850 까지 15단계 바닥 매수벽을 설치 및 유지합니다.
-        자전 거래용 가용 자금(최소 45.0 USDT)을 항상 보존하면서, 
-        상위 바닥 호가(0.00000990부터 순서대로)부터 우선 배치합니다.
+        외부 매도벽보다 최소 15% 이상 안전하게 떨어진 깊은 바닥 가격(0.00000850 이하)에만
+        바닥 매수벽을 설치하여 외부 일반 매도세에 절대 긁히지 않도록 방어합니다.
         """
+        ob = self.get_orderbook(symbol)
+        asks = ob.get('asks', []) if ob else []
+        lowest_ask = float(asks[0][0]) if asks else 0.00001000
+        safe_floor_ceiling = min(0.00000850, lowest_ask * 0.85)
+
         open_orders = self.get_open_orders(symbol)
         open_buy_orders = [o for o in open_orders if o.get('side') == 2 or o.get('side') == '2']
         
         # 현재 걸려있는 매수 주문 가격들 (소수점 8자리 기준 비교)
         existing_buy_prices = set(round(float(o.get('price', 0)), 8) for o in open_buy_orders)
         
-        missing_floor_prices = [p for p in self.floor_bid_prices if p not in existing_buy_prices]
+        safe_floor_prices = [p for p in self.floor_bid_prices if p <= safe_floor_ceiling]
+        missing_floor_prices = [p for p in safe_floor_prices if p not in existing_buy_prices]
         
         if missing_floor_prices:
-            # 0.00000990 (가장 높은 가격)부터 우선 설치되도록 정렬
             missing_floor_prices.sort(reverse=True)
             floor_order_usdt = 10.5
-            wash_reserve_usdt = 25.0  # 자전거래 연료로 남겨둘 최소 가용 USDT
+            wash_reserve_usdt = 35.0  # 자전거래 연료로 남겨둘 최소 가용 USDT
             
             for p in missing_floor_prices:
                 # 주문 전 잔고 확인: 자전거래용 예비금 + 주문금액 필요
@@ -319,82 +323,35 @@ class MarketMaker:
                     "amount": amt_str
                 })
                 if res.get("code") == 0:
-                    self.log(f"🛡️ 바닥 매수벽 설치: {p_str} | {amt_str} AIR (${floor_order_usdt:.1f})")
+                    self.log(f"🛡️ [안전 깊은 바닥 매수벽] 설치: {p_str} | {amt_str} AIR (${floor_order_usdt:.1f})")
                 time.sleep(0.15)
 
     def maintain_grid(self, symbol):
-        # 1. 15단계 바닥 매수벽 점검 및 설치
+        # 1. 외부 매도벽과 충분히 떨어진 안전 깊은 바닥 매수벽만 점검 및 유지
         self.maintain_floor_bids(symbol)
         
         open_orders = self.get_open_orders(symbol)
         floor_prices_set = set(self.floor_bid_prices)
         
-        # 2. 매도벽(Asks)은 외부에 의해 충분하므로 봇은 일체 생성하지 않음 -> 잔여 매도 주문이 있으면 정리
+        # 2. 매도벽(Asks) 정리
         sell_orders = [o for o in open_orders if o.get('side') == 1 or o.get('side') == '1']
         if sell_orders:
             self.log(f"🧹 [매도벽 미생성 정책] 기존 봇 매도 주문 {len(sell_orders)}개를 정리합니다.")
             for o in sell_orders:
                 self.cancel_order(o["id"], symbol)
-            time.sleep(0.5)
+            time.sleep(0.3)
             
-        # 3. 상단 매수벽(Bids) 관리: 여유 USDT가 있을 경우만 타겟 가격 하단에 배치
-        grid_buy_orders = [o for o in open_orders if (o.get('side') == 2 or o.get('side') == '2') and o["id"] != self.active_wash_buy_id and round(float(o.get('price', 0)), 8) not in floor_prices_set]
-        
-        wash_reserve = 35.0
-        grid_usdt = max(0.0, self.usdt_bal - wash_reserve)
-        min_order_usdt = 11.0
-        expected_bids = min(15, int(grid_usdt / min_order_usdt))
-        
-        target_price = self.config.target_price
-        need_rebuild = False
-        if abs(getattr(self, 'last_grid_target_price', 0.0) - target_price) > 0.00000200:
-            need_rebuild = True
-        elif expected_bids > 0 and len(grid_buy_orders) < max(1, expected_bids - 2):
-            need_rebuild = True
-            
-        if need_rebuild and expected_bids > 0:
-            for o in grid_buy_orders:
+        # 3. 외부 매도세 침범 위험이 있는 상단 임의 매수 주문은 취소하여 USDT를 100% 안전하게 보호
+        near_buy_orders = [o for o in open_orders if (o.get('side') == 2 or o.get('side') == '2') and o["id"] != self.active_wash_buy_id and round(float(o.get('price', 0)), 8) not in floor_prices_set]
+        if near_buy_orders:
+            self.log(f"🛡️ [USDT 보호] 시장가 인근 위험 매수 주문 {len(near_buy_orders)}개를 취소하여 외부 매도 침범을 방어합니다.")
+            for o in near_buy_orders:
                 self.cancel_order(o["id"], symbol)
             time.sleep(0.3)
-            self.place_new_grid(symbol)
 
     def place_new_grid(self, symbol):
-        target_price = self.config.target_price
-        self.last_grid_target_price = target_price
-        
-        # 매도벽(Asks)은 일체 생성하지 않음!
-        
-        # 상단 매수벽 (Bids) 배치 (가용 USDT 여유분으로만 배치)
-        wash_reserve = 35.0
-        grid_usdt = max(0.0, self.usdt_bal - wash_reserve)
-        min_order_usdt = 11.0
-        num_bids = min(15, int(grid_usdt / min_order_usdt))
-        
-        if num_bids > 0:
-            self.log(f"🟢 [매수벽 보강] 총 {num_bids}개 매수 주문 배치 (가용 USDT: {grid_usdt:.2f})")
-            for i in range(num_bids):
-                min_bid_price = max(0.00001000, target_price * 0.980)
-                max_bid_price = target_price * 0.999
-                
-                if max_bid_price <= min_bid_price:
-                    p_bid = max_bid_price
-                elif num_bids > 1:
-                    p_bid = max_bid_price - (max_bid_price - min_bid_price) * i / (num_bids - 1.0)
-                else:
-                    p_bid = max_bid_price
-                    
-                bid_size_usdt = grid_usdt / num_bids
-                amt_bid = bid_size_usdt / p_bid
-                p_str = "{:.8f}".format(p_bid)
-                amt_str = "{:.3f}".format(amt_bid)
-                
-                self.private_post("/api/v1/private/trade/limit", {
-                    "market": symbol,
-                    "side": 2, # Buy
-                    "price": p_str,
-                    "amount": amt_str
-                })
-                time.sleep(0.15)
+        # 시장가 인근에는 노출 매수벽을 세우지 않고 1:1 원자적 즉시 맞체결로만 거래합니다.
+        pass
 
     def run_mm_loop(self):
         symbol = self.config.symbol
@@ -564,24 +521,19 @@ class MarketMaker:
                         continue
 
                     # 5. 1:1 원자적(Atomic) 즉시 맞체결 자전거래 (15 USDT 단위)
-                    # 매수와 매도를 동시에 100% 동일 수량으로 내어 외부 매도세 침범을 원천 차단
+                    # [외부 매도물량 매수 방지 핵심]:
+                    # 1) target_price는 무조건 외부 최저 매도호가(lowest_ask)보다 엄격히 낮게 제한
+                    # 2) 본인 매도(Sell)를 먼저 호가창(lowest_ask 아래)에 올리고, 0.03초 후 본인 매수(Buy)로 타격
+                    # 3) 외부 매도벽(lowest_ask 이상)과는 가격이 달라 절대 체결될 수 없으며, 본인 매도물량만 100% 매수됨
+                    target_price = min(target_price, round(lowest_ask - max(0.00000002, self.config.micro_gap), 8))
+                    
                     wash_usdt = min(15.0, max(10.5, self.usdt_bal * 0.90))
                     wash_air = round(wash_usdt / target_price, 3)
                     
                     p_str = "{:.8f}".format(target_price)
                     amt_str = "{:.3f}".format(wash_air)
                     
-                    # 1) 본인 매수 주문 전송
-                    res_buy = self.private_post("/api/v1/private/trade/limit", {
-                        "market": symbol,
-                        "side": 2, # Buy
-                        "price": p_str,
-                        "amount": amt_str
-                    })
-                    buy_id = res_buy.get("result", {}).get("id") if res_buy else None
-                    
-                    # 2) 0.05초 내에 동일 가격 및 수량으로 본인 매도 주문 전송 (100% 자가 체결)
-                    time.sleep(0.05)
+                    # 1) 본인 매도 주문을 먼저 전송하여 lowest_ask 아래에 최우선 매도호가 생성
                     res_sell = self.private_post("/api/v1/private/trade/limit", {
                         "market": symbol,
                         "side": 1, # Sell
@@ -590,13 +542,23 @@ class MarketMaker:
                     })
                     sell_id = res_sell.get("result", {}).get("id") if res_sell else None
                     
-                    time.sleep(0.5)
+                    # 2) 0.03초 내에 동일 가격 및 수량으로 본인 매수 주문 전송 -> 방금 올린 본인 매도와 100% 즉시 체결
+                    time.sleep(0.03)
+                    res_buy = self.private_post("/api/v1/private/trade/limit", {
+                        "market": symbol,
+                        "side": 2, # Buy
+                        "price": p_str,
+                        "amount": amt_str
+                    })
+                    buy_id = res_buy.get("result", {}).get("id") if res_buy else None
+                    
+                    time.sleep(0.3)
                     
                     # 3) 미체결 잔여 물량 즉시 취소 (외부인이 긁어가는 것 방지)
-                    if buy_id:
-                        self.cancel_order(buy_id, symbol)
                     if sell_id:
                         self.cancel_order(sell_id, symbol)
+                    if buy_id:
+                        self.cancel_order(buy_id, symbol)
                         
                     cycle_washed_usdt += wash_usdt
                     progress = (cycle_washed_usdt / cycle_target_usdt) * 100
