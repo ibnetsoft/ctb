@@ -441,24 +441,31 @@ class MarketMaker:
                     amt_str = "{:.3f}".format(wash_air)
 
                     # 4. 스프레드 내부 1:1 선(先)매도 후(後)매수 즉시 맞체결
+                    # [규칙: 절대 먼저 매수하지 않고, 100% 선(先)매도 성공 확인 후에만 매수 스윕]
                     # 1) 본인 매도 주문을 스프레드 사이에 올림 (best_bid보다 높아 외부 매수자 체결 불가)
                     res_sell = self.private_post("/api/v1/private/trade/limit", {
                         "market": symbol,
-                        "side": 1, # Sell
+                        "side": 1, # Sell (선매도)
                         "price": p_str,
                         "amount": amt_str
                     })
-                    sell_id = res_sell.get("result", {}).get("id") if res_sell else None
+                    sell_id = res_sell.get("result", {}).get("id") if (res_sell and res_sell.get("code") == 0) else None
                     
-                    # 2) 0.02초 내에 동일 가격 및 수량으로 본인 매수 발주 -> 방금 올린 본인 매도와 100% 즉시 체결
+                    # 선매도 주문이 정상 생성되지 않았으면 매수 주문을 절대 발주하지 않고 안전하게 건너뜀
+                    if not sell_id:
+                        self.log(f"⚠️ 선매도 발주 실패로 매수 스윕을 안전하게 취소합니다: {res_sell}")
+                        time.sleep(2)
+                        continue
+                    
+                    # 2) 선매도 확인 완료 -> 0.02초 내에 동일 가격 및 수량으로 본인 매수 발주 -> 방금 올린 본인 매도와 100% 즉시 체결
                     time.sleep(0.02)
                     res_buy = self.private_post("/api/v1/private/trade/limit", {
                         "market": symbol,
-                        "side": 2, # Buy
+                        "side": 2, # Buy (후매수)
                         "price": p_str,
                         "amount": amt_str
                     })
-                    buy_id = res_buy.get("result", {}).get("id") if res_buy else None
+                    buy_id = res_buy.get("result", {}).get("id") if (res_buy and res_buy.get("code") == 0) else None
                     
                     time.sleep(0.2)
                     
