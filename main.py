@@ -36,12 +36,19 @@ async def get_dashboard():
 @app.get("/api/status")
 async def get_status():
     return {
+        "exchange": config.exchange,
+        "symbol": config.symbol,
+        "base_asset": bot.get_base_asset_name(),
         "is_running": config.is_running,
         "btc_price": bot.current_btc_p,
         "air_target": bot.target_mid,
         "vol_ratio": bot.vol_ratio,
         "usdt_bal": bot.usdt_bal,
+        "usdt_total": getattr(bot, "usdt_total", bot.usdt_bal),
+        "usdt_freeze": getattr(bot, "usdt_freeze", 0.0),
         "air_bal": bot.air_bal,
+        "air_total": getattr(bot, "air_total", bot.air_bal),
+        "air_freeze": getattr(bot, "air_freeze", 0.0),
         "last_status": bot.last_status,
         "beta": config.beta,
         "interval": config.interval,
@@ -75,22 +82,52 @@ async def cancel_all():
     count = bot.cancel_all_orders(config.symbol)
     balances = bot.get_balances()
     if balances:
-        bot.air_bal = float(balances.get("AIR", {}).get("available", "0"))
+        base_asset = bot.get_base_asset_name()
+        bot.air_bal = float(balances.get(base_asset, {}).get("available", "0"))
         bot.usdt_bal = float(balances.get("USDT", {}).get("available", "0"))
     return {"status": "success", "cancelled_count": count, "usdt_bal": bot.usdt_bal, "air_bal": bot.air_bal}
+
+@app.post("/api/generate_grid")
+async def generate_grid(data: dict = {}):
+    center_price = float(data.get("center_price")) if data.get("center_price") else 540.5
+    levels = int(data.get("levels", 12))
+    step = float(data.get("step", 0.04))
+    amount = float(data.get("amount", 0.02))
+    cancel_existing = bool(data.get("cancel_existing", True))
+    min_price = float(data.get("min_price", 540.0))
+    max_price = float(data.get("max_price", 541.0))
+    organic = bool(data.get("organic", True))
+    
+    res = bot.generate_orderbook_grid(
+        center_price=center_price,
+        levels=levels,
+        step=step,
+        amount_per_order=amount,
+        cancel_existing=cancel_existing,
+        min_price=min_price,
+        max_price=max_price,
+        organic=organic
+    )
+    return res
 
 @app.get("/api/orderbook")
 async def get_orderbook():
     ob = bot.get_orderbook(config.symbol)
-    bids = ob.get("bids", [])
-    asks = ob.get("asks", [])
+    raw_bids = ob.get("bids", [])
+    raw_asks = ob.get("asks", [])
+    bids = sorted(raw_bids, key=lambda x: float(x[0]), reverse=True) if raw_bids else []
+    asks = sorted(raw_asks, key=lambda x: float(x[0]), reverse=False) if raw_asks else []
+    
     best_bid = float(bids[0][0]) if bids else 0.0
     best_ask = float(asks[0][0]) if asks else 0.0
-    spread = best_ask - best_bid if (bids and asks) else 0.0
+    spread = max(0.0, best_ask - best_bid) if (bids and asks) else 0.0
     margin = max(0.00000002, spread * 0.04)
-    min_sweep = round(best_bid + margin, 8)
-    max_sweep = round(best_ask - margin, 8)
-    mid_sweep = round((best_bid + best_ask) / 2.0, 8)
+    min_sweep = round(best_bid + margin, 4)
+    max_sweep = round(best_ask - margin, 4)
+    if config.price_min > 0 and config.price_max > 0:
+        min_sweep = max(min_sweep, round(config.price_min + 0.002, 4))
+        max_sweep = min(max_sweep, round(config.price_max - 0.002, 4))
+    mid_sweep = round((best_bid + best_ask) / 2.0, 4)
     return {
         "best_bid": best_bid,
         "best_ask": best_ask,
@@ -98,12 +135,14 @@ async def get_orderbook():
         "min_sweep": min_sweep,
         "max_sweep": max_sweep,
         "mid_sweep": mid_sweep,
-        "bids": bids[:5],
-        "asks": asks[:5]
+        "bids": bids[:12],
+        "asks": asks[:12]
     }
 
 @app.post("/api/config")
 async def update_config(data: dict):
+    if "exchange" in data: config.exchange = str(data["exchange"]).lower()
+    if "symbol" in data: config.symbol = str(data["symbol"])
     if "beta" in data: config.beta = float(data["beta"])
     if "interval" in data: config.interval = int(data["interval"])
     if "target_price" in data:
@@ -130,11 +169,14 @@ async def update_config(data: dict):
     if "pause_duration" in data:
         config.pause_duration = int(data["pause_duration"])
     config.save_config()
+    bot.init_client()
     return {"status": "success"}
 
 @app.get("/api/settings")
 async def get_settings():
     return {
+        "exchange": config.exchange,
+        "symbol": config.symbol,
         "api_key": config.api_key[:4] + "*" * (len(config.api_key)-8) + config.api_key[-4:] if config.api_key else "",
         "secret_key": config.secret_key[:4] + "*" * (len(config.secret_key)-8) + config.secret_key[-4:] if config.secret_key else "",
         "telegram_token": config.telegram_token[:4] + "*" * (len(config.telegram_token)-8) + config.telegram_token[-4:] if config.telegram_token else "",
@@ -156,6 +198,8 @@ async def get_settings():
 @app.post("/api/settings")
 async def save_settings(data: dict):
     # 실제 키가 입력된 경우만 업데이트 (마스킹된 값 무시)
+    if "exchange" in data: config.exchange = str(data["exchange"]).lower()
+    if "symbol" in data: config.symbol = str(data["symbol"])
     if "api_key" in data and "*" not in data["api_key"]: config.api_key = data["api_key"]
     if "secret_key" in data and "*" not in data["secret_key"]: config.secret_key = data["secret_key"]
     if "telegram_token" in data and "*" not in data["telegram_token"]: config.telegram_token = data["telegram_token"]
@@ -186,6 +230,7 @@ async def save_settings(data: dict):
         config.pause_duration = int(data["pause_duration"])
     
     config.save_config()
+    bot.init_client()
     return {"status": "success"}
 
 @app.post("/api/test_telegram")
@@ -195,6 +240,86 @@ async def test_telegram():
     
     bot.send_telegram("🔔 테스트 메시지입니다. 연결이 확인되었습니다!")
     return {"status": "success"}
+
+@app.get("/api/test_connection")
+async def test_connection():
+    if not config.api_key or not config.secret_key:
+        return {
+            "status": "error",
+            "message": "API Key 또는 Secret Key가 설정되지 않았습니다. 키를 먼저 입력하고 저장해 주세요."
+        }
+    
+    try:
+        bot.init_client()
+        balances = bot.get_balances()
+        if not balances:
+            return {
+                "status": "error",
+                "message": f"[{config.exchange.upper()}] 거래소 연동 실패! API Key/Secret이 올바른지, IP 화이트리스트가 적용되어 있는지 확인해 주세요."
+            }
+        
+        base_asset = bot.get_base_asset_name()
+        symbol = config.symbol
+        orders = bot.get_open_orders(symbol)
+        
+        usdt_info = balances.get("USDT", {"available": "0", "freeze": "0"})
+        base_info = balances.get(base_asset, {"available": "0", "freeze": "0"})
+        
+        usdt_avail = float(usdt_info.get("available", 0))
+        usdt_freeze = float(usdt_info.get("freeze", 0))
+        usdt_total = usdt_avail + usdt_freeze
+        
+        base_avail = float(base_info.get("available", 0))
+        base_freeze = float(base_info.get("freeze", 0))
+        base_total = base_avail + base_freeze
+        
+        buy_orders = []
+        sell_orders = []
+        for o in orders:
+            side_str = str(o.get("side", "")).lower()
+            order_item = {
+                "id": str(o.get("id", "")),
+                "price": float(o.get("price", 0)),
+                "amount": float(o.get("amount", 0)),
+                "side": "buy" if side_str in ["buy", "2", 2] else "sell"
+            }
+            if order_item["side"] == "buy":
+                buy_orders.append(order_item)
+            else:
+                sell_orders.append(order_item)
+                
+        buy_orders.sort(key=lambda x: x["price"], reverse=True)
+        sell_orders.sort(key=lambda x: x["price"])
+        
+        return {
+            "status": "success",
+            "exchange": config.exchange,
+            "symbol": symbol,
+            "base_asset": base_asset,
+            "usdt": {
+                "available": usdt_avail,
+                "freeze": usdt_freeze,
+                "total": usdt_total
+            },
+            "token": {
+                "name": base_asset,
+                "available": base_avail,
+                "freeze": base_freeze,
+                "total": base_total
+            },
+            "orders": {
+                "total_count": len(orders),
+                "buy_count": len(buy_orders),
+                "sell_count": len(sell_orders),
+                "buy_orders": buy_orders,
+                "sell_orders": sell_orders
+            }
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"연동 검증 중 오류 발생: {str(e)}"
+        }
 
 @app.get("/api/logs")
 async def get_logs():

@@ -39,7 +39,8 @@
             <div class="space-y-1">
                 <h1 class="text-3xl font-bold tracking-tight text-white flex items-center gap-3">
                     <span class="w-3 h-3 rounded-full bg-emerald-400 group-hover:animate-ping inline-block"></span>
-                    AIR_USDT Market Maker
+                    <span id="title-symbol">AIR_USDT</span> Market Maker
+                    <span id="title-exchange" class="text-xs px-2.5 py-1 rounded-full bg-white/10 text-emerald-400 uppercase font-mono font-bold tracking-wider">DIGIFINEX</span>
                 </h1>
                 <p class="text-gray-400 text-sm font-light">Real-time Trading & Liquidity Control Dashboard</p>
             </div>
@@ -51,6 +52,9 @@
                 <div id="status-badge" class="px-4 py-2 rounded-full text-xs font-semibold tracking-widest text-white uppercase toggle-active">
                     ACTIVE
                 </div>
+                <button onclick="scrollToGridMaker()" class="bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 border border-indigo-500/40 px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shadow-lg shadow-indigo-500/10">
+                    <span>📚</span> 호가 생성
+                </button>
                 <button onclick="toggleBot()" id="toggle-btn" class="glass px-6 py-2 rounded-xl text-sm font-semibold hover:bg-white/5 transition-colors">
                     PAUSE BOT
                 </button>
@@ -75,11 +79,11 @@
                 </div>
             </div>
 
-            <!-- AIR Target / Safe Mid -->
+            <!-- Target Mid Price -->
             <div class="glass p-5 rounded-2xl stat-card space-y-2">
-                <p class="text-xs text-emerald-500 uppercase tracking-widest font-semibold">SAFE SWEEP TARGET</p>
+                <p class="text-xs text-emerald-500 uppercase tracking-widest font-semibold"><span id="target-asset-label">TARGET</span> SWEEP PRICE</p>
                 <div class="text-2xl font-bold text-emerald-400 neon-glow flex items-baseline gap-2">
-                    <span id="air-target" class="font-mono">--</span>
+                    <span id="target-price-display" class="font-mono">--</span>
                     <span class="text-xs font-normal">USDT</span>
                 </div>
                 <div class="text-[10px] text-gray-500">안전 스윕 범위: <span id="safe-range-display" class="font-mono text-gray-300">--</span></div>
@@ -93,21 +97,30 @@
                     <span class="text-xs text-emerald-400 font-normal">USDT</span>
                 </div>
                 <div class="text-[10px] text-gray-500 flex justify-between">
-                    <span>Live feed from Biconomy</span>
+                    <span id="feed-source">Live ticker feed</span>
                     <span id="uptime-display">Up: 0s</span>
                 </div>
             </div>
 
             <!-- Balance -->
             <div class="glass p-5 rounded-2xl stat-card space-y-2">
-                <p class="text-xs text-gray-500 uppercase tracking-widest font-semibold">ASSETS AVAILABLE</p>
-                <div class="flex justify-between items-center text-sm">
-                    <span class="text-gray-400">USDT</span>
-                    <span id="usdt-bal" class="font-bold text-emerald-400">--</span>
+                <div class="flex justify-between items-center">
+                    <p class="text-xs text-gray-500 uppercase tracking-widest font-semibold">ASSETS & BALANCE</p>
+                    <span class="text-[10px] text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded font-mono">100% 자산보존</span>
                 </div>
                 <div class="flex justify-between items-center text-sm">
-                    <span class="text-gray-400">AIR</span>
-                    <span id="air-bal" class="font-bold text-white">--</span>
+                    <span class="text-gray-400">USDT 총액</span>
+                    <div class="text-right">
+                        <span id="usdt-total" class="font-bold text-emerald-400">--</span>
+                        <div class="text-[10px] text-gray-400">가용: <span id="usdt-bal">--</span> | 호가: <span id="usdt-freeze">--</span></div>
+                    </div>
+                </div>
+                <div class="flex justify-between items-center text-sm">
+                    <span class="text-gray-400 font-bold" id="base-asset-label">TOKEN 총액</span>
+                    <div class="text-right">
+                        <span id="base-total" class="font-bold text-white">--</span>
+                        <div class="text-[10px] text-gray-400">가용: <span id="base-bal">--</span> | 호가: <span id="base-freeze">--</span></div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -172,6 +185,107 @@
                     </p>
                 </div>
 
+                <!-- Dual-Sided Orderbook Grid Generator -->
+                <div id="grid-maker-card" class="bg-indigo-500/10 border border-indigo-500/30 p-5 rounded-2xl space-y-4 transition-all">
+                    <div class="flex justify-between items-center">
+                        <h3 class="text-sm font-bold text-indigo-400 flex items-center gap-2">
+                            <span>📚</span> 양방향 호가 생성 (Order Book Grid)
+                        </h3>
+                        <span class="text-[10px] px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 font-bold">오더북 배치</span>
+                    </div>
+
+                    <div class="space-y-3">
+                        <div>
+                            <div class="flex justify-between items-center mb-1">
+                                <label class="text-[10px] text-gray-300 font-medium">기준 중심 가격 (Center Price)</label>
+                                <button type="button" onclick="autoFillCenterPrice()" class="text-[10px] text-indigo-400 underline font-semibold hover:text-indigo-300">
+                                    현재가 가져오기
+                                </button>
+                            </div>
+                            <input type="number" id="grid-center-price" step="any" placeholder="540.50" value="540.50"
+                                   class="w-full bg-black/40 border border-white/20 rounded-xl px-2.5 py-2 text-xs text-indigo-300 font-mono font-bold focus:border-indigo-500 outline-none">
+                        </div>
+
+                        <div class="grid grid-cols-3 gap-2">
+                            <div>
+                                <label class="text-[10px] text-gray-300 block mb-1">단계 (Levels)</label>
+                                <input type="number" id="grid-levels" min="1" max="20" value="12"
+                                       class="w-full bg-black/40 border border-white/20 rounded-xl px-2.5 py-1.5 text-xs text-white font-mono focus:border-indigo-500 outline-none">
+                            </div>
+                            <div>
+                                <label class="text-[10px] text-gray-300 block mb-1">평균 간격 (Step)</label>
+                                <input type="number" id="grid-step" step="any" value="0.04"
+                                       class="w-full bg-black/40 border border-white/20 rounded-xl px-2.5 py-1.5 text-xs text-white font-mono focus:border-indigo-500 outline-none">
+                            </div>
+                            <div>
+                                <label class="text-[10px] text-gray-300 block mb-1">주문당 수량</label>
+                                <input type="number" id="grid-amount" step="any" value="0.02"
+                                       class="w-full bg-black/40 border border-white/20 rounded-xl px-2.5 py-1.5 text-xs text-white font-mono focus:border-indigo-500 outline-none">
+                            </div>
+                        </div>
+
+                        <div class="flex items-center justify-between gap-2 pt-1 text-[11px] text-gray-300">
+                            <label class="flex items-center gap-1.5 cursor-pointer">
+                                <input type="checkbox" id="grid-organic" checked class="rounded bg-black/40 border-white/20 text-indigo-500">
+                                <span>🎲 소수점 4자리 불규칙 호가 (자연스러운 봇 방지)</span>
+                            </label>
+                            <label class="flex items-center gap-1.5 cursor-pointer">
+                                <input type="checkbox" id="grid-cancel-existing" checked class="rounded bg-black/40 border-white/20 text-indigo-500">
+                                <span>기존 주문 정리</span>
+                            </label>
+                        </div>
+
+                        <button onclick="generateGridOrders()" id="grid-generate-btn" class="w-full bg-indigo-500 hover:bg-indigo-400 text-white font-bold py-3 rounded-xl transition-all shadow-lg shadow-indigo-500/20 flex items-center justify-center gap-2 text-xs">
+                            <span>⚡</span> 양방향 호가 오더북 생성
+                        </button>
+                    </div>
+                    <p class="text-[10px] text-gray-400 leading-tight">
+                        기준가를 중심으로 상단에 매도 N건, 하단에 매수 N건을 배치하여 호가창을 두텁게 채웁니다.
+                    </p>
+                </div>
+
+                <!-- Box-Range Oscillation Settings -->
+                <div class="bg-blue-500/10 border border-blue-500/30 p-5 rounded-2xl space-y-4">
+                    <div class="flex justify-between items-center">
+                        <h3 class="text-sm font-bold text-blue-400 flex items-center gap-2">
+                            <span>📈</span> 박스권 파동 거래 (Box-Range MM)
+                        </h3>
+                        <label class="relative inline-flex items-center cursor-pointer">
+                            <input type="checkbox" id="price-oscillation-toggle" class="sr-only peer">
+                            <div class="w-8 h-4 bg-white/10 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-gray-300 after:border-gray-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-blue-500"></div>
+                        </label>
+                    </div>
+
+                    <div class="space-y-3">
+                        <div class="grid grid-cols-2 gap-2">
+                            <div>
+                                <label class="text-[10px] text-gray-300 block mb-1">최저가 (Min Price)</label>
+                                <input type="number" id="price-min-input" step="any" placeholder="예: 538.30"
+                                       class="w-full bg-black/40 border border-white/20 rounded-xl px-2.5 py-1.5 text-xs text-blue-400 font-mono font-bold focus:border-blue-500 outline-none">
+                            </div>
+                            <div>
+                                <label class="text-[10px] text-gray-300 block mb-1">최고가 (Max Price)</label>
+                                <input type="number" id="price-max-input" step="any" placeholder="예: 539.80"
+                                       class="w-full bg-black/40 border border-white/20 rounded-xl px-2.5 py-1.5 text-xs text-red-400 font-mono font-bold focus:border-blue-500 outline-none">
+                            </div>
+                        </div>
+
+                        <div class="flex items-center justify-between gap-2">
+                            <div class="flex-1">
+                                <label class="text-[10px] text-gray-300 block mb-1">변동 스텝 (Step)</label>
+                                <input type="number" id="price-step-input" step="any" placeholder="예: 0.05"
+                                       class="w-full bg-black/40 border border-white/20 rounded-xl px-2.5 py-1.5 text-xs text-white font-mono focus:border-blue-500 outline-none">
+                            </div>
+                            <button onclick="autoSetRange()" type="button" class="mt-4 px-3 py-1.5 bg-blue-500/20 hover:bg-blue-500/30 text-blue-300 text-[10px] font-bold rounded-lg border border-blue-500/30 transition-all">
+                                호가 자동 채우기
+                            </button>
+                        </div>
+                    </div>
+                    <p class="text-[10px] text-gray-400 leading-tight">
+                        지정된 범위 안에서 캔들의 윗꼬리/아랫꼬리를 형성하며 지그재그로 오르내리는 파동 차트를 완성합니다.
+                    </p>
+                </div>
+
                 <!-- Auto Loop Settings -->
                 <div class="space-y-4 pt-2">
                     <h3 class="text-sm font-bold text-gray-200">자동 연속 거래 설정</h3>
@@ -227,8 +341,22 @@
                         API Configuration
                     </h3>
                     <div class="space-y-4">
+                        <div class="grid grid-cols-2 gap-4">
+                            <div class="space-y-2">
+                                <label class="text-xs text-gray-400 uppercase tracking-widest font-bold">거래소 (Exchange)</label>
+                                <select id="set-exchange" class="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:border-emerald-500 outline-none transition-all">
+                                    <option value="digifinex" class="bg-gray-900 text-white">DigiFinex (디지파이넥스)</option>
+                                    <option value="biconomy" class="bg-gray-900 text-white">Biconomy (바이코노미)</option>
+                                </select>
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-xs text-gray-400 uppercase tracking-widest font-bold">거래 페어 (Symbol)</label>
+                                <input type="text" id="set-symbol" placeholder="AIR_USDT" 
+                                       class="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:border-emerald-500 outline-none transition-all">
+                            </div>
+                        </div>
                         <div class="space-y-2">
-                            <label class="text-xs text-gray-400 uppercase tracking-widest font-bold">API Key</label>
+                            <label class="text-xs text-gray-400 uppercase tracking-widest font-bold">API Key (ACCESS-KEY)</label>
                             <input type="text" id="set-api-key" placeholder="Enter API Key" 
                                    class="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:border-emerald-500 outline-none transition-all">
                         </div>
@@ -271,13 +399,34 @@
             </div>
 
             <!-- Action Buttons -->
-            <div class="flex gap-4 mt-8">
-                <button onclick="saveSettings()" class="flex-1 bg-emerald-500 hover:bg-emerald-400 text-black font-bold py-4 rounded-2xl transition-all shadow-lg shadow-emerald-500/20">
+            <div class="flex flex-wrap gap-4 mt-8">
+                <button onclick="saveSettings()" class="flex-1 min-w-[200px] bg-emerald-500 hover:bg-emerald-400 text-black font-bold py-4 rounded-2xl transition-all shadow-lg shadow-emerald-500/20">
                     SAVE & APPLY CHANGES
                 </button>
-                <button onclick="testTelegram()" class="px-8 bg-white/5 hover:bg-white/10 text-white font-bold py-4 rounded-2xl transition-all border border-white/10">
+                <button onclick="checkApiConnection()" id="btn-check-conn" class="px-6 bg-blue-500 hover:bg-blue-400 text-black font-bold py-4 rounded-2xl transition-all shadow-lg shadow-blue-500/20 flex items-center justify-center gap-2">
+                    <span>🔍</span> API 연동 확인 (잔고 & 주문)
+                </button>
+                <button onclick="cancelAllFromSettings()" id="btn-cancel-all-set" class="px-6 bg-red-500/20 hover:bg-red-500/40 text-red-400 font-bold py-4 rounded-2xl transition-all border border-red-500/30 flex items-center justify-center gap-2">
+                    <span>🧹</span> 전체 주문 취소
+                </button>
+                <button onclick="testTelegram()" class="px-6 bg-white/5 hover:bg-white/10 text-white font-bold py-4 rounded-2xl transition-all border border-white/10">
                     TEST TELEGRAM
                 </button>
+            </div>
+
+            <!-- API Connection & Order Status Box -->
+            <div id="conn-test-box" class="glass p-6 rounded-3xl mt-6 space-y-4">
+                <div class="flex justify-between items-center border-b border-white/10 pb-4">
+                    <h4 class="font-bold text-base flex items-center gap-2 text-white">
+                        <span>📊</span> API 연동 잔고 및 미체결 주문 현황
+                    </h4>
+                    <span id="conn-test-time" class="text-xs text-gray-500 font-mono"></span>
+                </div>
+
+                <!-- Initial placeholder -->
+                <div id="conn-test-content" class="text-center py-6 text-gray-400 text-sm">
+                    👉 상단의 <b>[🔍 API 연동 확인 (잔고 & 주문)]</b> 버튼을 클릭하면 실시간 보유 수량과 매수/매도 주문 목록이 표시됩니다.
+                </div>
             </div>
         </div>
     </div>
@@ -313,6 +462,8 @@
             try {
                 const res = await fetch('/api/settings');
                 const data = await res.json();
+                if (data.exchange) document.getElementById('set-exchange').value = data.exchange;
+                if (data.symbol) document.getElementById('set-symbol').value = data.symbol;
                 document.getElementById('set-api-key').value = data.api_key;
                 document.getElementById('set-secret-key').value = data.secret_key;
                 document.getElementById('set-tg-token').value = data.telegram_token;
@@ -328,6 +479,8 @@
             btn.disabled = true;
 
             const data = {
+                exchange: document.getElementById('set-exchange').value,
+                symbol: document.getElementById('set-symbol').value,
                 api_key: document.getElementById('set-api-key').value,
                 secret_key: document.getElementById('set-secret-key').value,
                 telegram_token: document.getElementById('set-tg-token').value,
@@ -343,9 +496,11 @@
                 });
                 const result = await res.json();
                 if (result.status === 'success') {
-                    alert('Settings saved successfully! Bot will use new keys in the next loop.');
+                    alert('설정이 성공적으로 저장되었습니다! 봇이 새 거래소 및 API 키를 즉시 사용합니다.');
+                    isInitialized = false;
+                    fetchStatus();
                 }
-            } catch (err) { alert('Failed to save settings'); }
+            } catch (err) { alert('설정 저장 실패: ' + err); }
             
             btn.innerText = originalText;
             btn.disabled = false;
@@ -361,6 +516,194 @@
                 else alert('Error: ' + result.message);
             } catch (err) { alert('Test failed'); }
             btn.disabled = false;
+        }
+
+        async function checkApiConnection() {
+            const btn = document.getElementById('btn-check-conn');
+            const originalText = btn.innerHTML;
+            btn.innerHTML = '<span>⏳</span> 연동 확인 중...';
+            btn.disabled = true;
+
+            const box = document.getElementById('conn-test-content');
+            box.innerHTML = '<div class="text-center py-8 text-blue-400 animate-pulse font-semibold">거래소 API 서버와 통신 중입니다. 잠시만 기다려주세요...</div>';
+
+            try {
+                const res = await fetch('/api/test_connection');
+                const data = await res.json();
+                
+                const timeEl = document.getElementById('conn-test-time');
+                if (timeEl) timeEl.innerText = `조회 시각: ${new Date().toLocaleTimeString()}`;
+
+                if (data.status !== 'success') {
+                    box.innerHTML = `
+                        <div class="p-4 rounded-xl bg-red-500/10 border border-red-500/30 text-red-400 text-sm space-y-1">
+                            <div class="font-bold flex items-center gap-2"><span>⚠️</span> 연동 실패</div>
+                            <div>${data.message}</div>
+                        </div>
+                    `;
+                    btn.innerHTML = originalText;
+                    btn.disabled = false;
+                    return;
+                }
+
+                const usdt = data.usdt;
+                const token = data.token;
+                const orders = data.orders;
+                const baseName = token.name;
+
+                let buyHtml = '';
+                if (!orders.buy_orders || orders.buy_orders.length === 0) {
+                    buyHtml = '<div class="text-xs text-gray-500 py-3 text-center">대기 중인 매수 주문 없음</div>';
+                } else {
+                    buyHtml = '<div class="space-y-1.5 max-h-48 overflow-y-auto pr-1">';
+                    orders.buy_orders.forEach(o => {
+                        buyHtml += `
+                            <div class="flex justify-between items-center bg-emerald-500/10 border border-emerald-500/20 px-3 py-2 rounded-xl text-xs font-mono">
+                                <div>
+                                    <span class="text-emerald-400 font-bold">매수 ${o.price}</span>
+                                    <span class="text-gray-400 ml-2">수량: ${o.amount} ${baseName}</span>
+                                </div>
+                                <span class="text-[10px] text-gray-500">ID: ${o.id}</span>
+                            </div>
+                        `;
+                    });
+                    buyHtml += '</div>';
+                }
+
+                let sellHtml = '';
+                if (!orders.sell_orders || orders.sell_orders.length === 0) {
+                    sellHtml = '<div class="text-xs text-gray-500 py-3 text-center">대기 중인 매도 주문 없음</div>';
+                } else {
+                    sellHtml = '<div class="space-y-1.5 max-h-48 overflow-y-auto pr-1">';
+                    orders.sell_orders.forEach(o => {
+                        sellHtml += `
+                            <div class="flex justify-between items-center bg-red-500/10 border border-red-500/20 px-3 py-2 rounded-xl text-xs font-mono">
+                                <div>
+                                    <span class="text-red-400 font-bold">매도 ${o.price}</span>
+                                    <span class="text-gray-400 ml-2">수량: ${o.amount} ${baseName}</span>
+                                </div>
+                                <span class="text-[10px] text-gray-500">ID: ${o.id}</span>
+                            </div>
+                        `;
+                    });
+                    sellHtml += '</div>';
+                }
+
+                box.innerHTML = `
+                    <div class="space-y-6">
+                        <!-- 보유 자산 카드 -->
+                        <div>
+                            <div class="text-xs font-bold text-gray-300 uppercase tracking-widest mb-3 flex items-center gap-2">
+                                <span>💰</span> 실시간 보유 자산 현황 (${data.exchange.toUpperCase()})
+                            </div>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <!-- USDT -->
+                                <div class="bg-white/5 border border-white/10 p-4 rounded-2xl space-y-2">
+                                    <div class="flex justify-between items-center text-xs text-gray-400">
+                                        <span class="font-bold text-white">USDT 잔고</span>
+                                        <span class="text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-bold">연동 완료</span>
+                                    </div>
+                                    <div class="text-2xl font-bold text-emerald-400 font-mono">
+                                        ${usdt.available.toLocaleString()} <span class="text-xs font-normal text-gray-400">가용</span>
+                                    </div>
+                                    <div class="flex justify-between text-xs text-gray-400 border-t border-white/5 pt-2">
+                                        <span>주문중 (동결): <b class="text-gray-200 font-mono">${usdt.freeze.toLocaleString()}</b></span>
+                                        <span>총액: <b class="text-gray-200 font-mono">${usdt.total.toLocaleString()}</b></span>
+                                    </div>
+                                </div>
+
+                                <!-- Target Token -->
+                                <div class="bg-white/5 border border-white/10 p-4 rounded-2xl space-y-2">
+                                    <div class="flex justify-between items-center text-xs text-gray-400">
+                                        <span class="font-bold text-white">${baseName} 잔고</span>
+                                        <span class="text-[10px] px-2 py-0.5 rounded bg-blue-500/20 text-blue-300 font-bold">기준 토큰</span>
+                                    </div>
+                                    <div class="text-2xl font-bold text-white font-mono">
+                                        ${token.available.toLocaleString()} <span class="text-xs font-normal text-gray-400">가용</span>
+                                    </div>
+                                    <div class="flex justify-between text-xs text-gray-400 border-t border-white/5 pt-2">
+                                        <span>주문중 (동결): <b class="text-gray-200 font-mono">${token.freeze.toLocaleString()}</b></span>
+                                        <span>총액: <b class="text-gray-200 font-mono">${token.total.toLocaleString()}</b></span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 미체결 주문 현황 -->
+                        <div>
+                            <div class="flex justify-between items-center mb-3">
+                                <div class="text-xs font-bold text-gray-300 uppercase tracking-widest flex items-center gap-2">
+                                    <span>📋</span> 현재 미체결 주문 현황 (${data.symbol})
+                                    <span class="text-[10px] px-2 py-0.5 rounded bg-white/10 text-gray-300">총 ${orders.total_count}건</span>
+                                </div>
+                            </div>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <!-- Buy Orders -->
+                                <div class="bg-black/40 border border-white/10 p-4 rounded-2xl space-y-3">
+                                    <div class="flex justify-between items-center text-xs">
+                                        <span class="font-bold text-emerald-400 flex items-center gap-1.5">
+                                            <span>🟢</span> 매수 주문 (Buy)
+                                        </span>
+                                        <span class="text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-bold">${orders.buy_count}건</span>
+                                    </div>
+                                    ${buyHtml}
+                                </div>
+
+                                <!-- Sell Orders -->
+                                <div class="bg-black/40 border border-white/10 p-4 rounded-2xl space-y-3">
+                                    <div class="flex justify-between items-center text-xs">
+                                        <span class="font-bold text-red-400 flex items-center gap-1.5">
+                                            <span>🔴</span> 매도 주문 (Sell)
+                                        </span>
+                                        <span class="text-[10px] px-2 py-0.5 rounded bg-red-500/20 text-red-400 font-bold">${orders.sell_count}건</span>
+                                    </div>
+                                    ${sellHtml}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+
+            } catch (err) {
+                box.innerHTML = `<div class="p-4 rounded-xl bg-red-500/10 border border-red-500/30 text-red-400 text-sm">연동 검증 중 오류: ${err.message}</div>`;
+            }
+
+            btn.innerHTML = originalText;
+            btn.disabled = false;
+        }
+
+        async function cancelAllFromSettings() {
+            if (!confirm('현재 거래 페어의 모든 미체결 매수/매도 주문을 취소하시겠습니까?')) {
+                return;
+            }
+            const btn = document.getElementById('btn-cancel-all-set');
+            const originalText = btn.innerHTML;
+            btn.innerHTML = '<span>⏳</span> 취소 중...';
+            btn.disabled = true;
+
+            try {
+                const res = await fetch('/api/cancel_all', { method: 'POST' });
+                const result = await res.json();
+                if (result.status === 'success') {
+                    alert(`총 ${result.cancelled_count}개의 미체결 주문이 취소되었습니다.`);
+                    checkApiConnection();
+                    fetchStatus();
+                } else {
+                    alert('주문 취소 실패: ' + (result.message || '알 수 없는 오류'));
+                }
+            } catch (err) {
+                alert('요청 실패: ' + err);
+            }
+
+            btn.innerHTML = originalText;
+            btn.disabled = false;
+        }
+
+        function safeSetText(id, val) {
+            const el = document.getElementById(id);
+            if (el && val !== undefined && val !== null) {
+                el.innerText = val;
+            }
         }
 
         async function fetchStatus() {
@@ -379,30 +722,75 @@
                     connStatus.className = 'flex items-center gap-2 px-3 py-1.5 rounded-lg bg-emerald-500/10 text-[10px] font-bold tracking-widest text-emerald-400';
                 }
 
-                document.getElementById('btc-price').innerText = data.btc_price.toLocaleString();
-                document.getElementById('air-target').innerText = data.air_target.toFixed(8);
-                document.getElementById('vol-ratio').innerText = data.vol_ratio.toFixed(2);
-                document.getElementById('usdt-bal').innerText = data.usdt_bal.toLocaleString();
-                document.getElementById('air-bal').innerText = data.air_bal.toLocaleString();
-                document.getElementById('last-status').innerText = data.last_status || 'Syncing...';
-                document.getElementById('beta-val-display').innerText = data.beta.toFixed(1);
+                // BTC 시세
+                safeSetText('btc-price', data.btc_price ? data.btc_price.toLocaleString() : '--');
                 
-                // Initialize inputs only once on load (or when isInitialized is reset to false)
+                // 타깃 가격 포맷팅
+                const targetP = data.air_target || 0;
+                let targetStr = '--';
+                if (targetP > 0) {
+                    targetStr = targetP >= 100 ? targetP.toFixed(2) : (targetP >= 1 ? targetP.toFixed(4) : targetP.toFixed(8));
+                }
+                safeSetText('target-price-display', targetStr);
+                safeSetText('air-target', targetStr);
+
+                // 잔고 (총액, 가용, 호가잠김)
+                const uTotal = data.usdt_total !== undefined ? Number(data.usdt_total) : (data.usdt_bal || 0);
+                const uFree = data.usdt_bal !== undefined ? Number(data.usdt_bal) : 0;
+                const uFreeze = data.usdt_freeze !== undefined ? Number(data.usdt_freeze) : (uTotal - uFree);
+                safeSetText('usdt-total', '$' + uTotal.toFixed(2));
+                safeSetText('usdt-bal', '$' + uFree.toFixed(2));
+                safeSetText('usdt-freeze', '$' + uFreeze.toFixed(2));
+
+                const bTotal = data.air_total !== undefined ? Number(data.air_total) : (data.air_bal || 0);
+                const bFree = data.air_bal !== undefined ? Number(data.air_bal) : 0;
+                const bFreeze = data.air_freeze !== undefined ? Number(data.air_freeze) : (bTotal - bFree);
+                safeSetText('base-total', bTotal.toFixed(2));
+                safeSetText('base-bal', bFree.toFixed(2));
+                safeSetText('base-freeze', bFreeze.toFixed(2));
+                safeSetText('air-bal', bTotal.toFixed(2));
+                
+                safeSetText('last-status', data.last_status || 'Syncing...');
+
+                // 통화쌍 및 기준 코인 동적 변경 (CTB_USDT -> CTB)
+                const sym = (data.symbol || 'CTB_USDT').toUpperCase();
+                const baseAsset = (data.base_asset || sym.split('_')[0]).toUpperCase();
+                
+                safeSetText('title-symbol', sym);
+                safeSetText('target-asset-label', baseAsset);
+                safeSetText('base-asset-label', baseAsset);
+                document.title = `MM Bot Dashboard | ${sym}`;
+
+                if (data.exchange) {
+                    safeSetText('title-exchange', data.exchange.toUpperCase());
+                    safeSetText('feed-source', `Live feed from ${data.exchange.toUpperCase()}`);
+                }
+                
+                // Initialize inputs only once on load
                 if (!isInitialized) {
                     const targetPriceInput = document.getElementById('target-price-input');
-                    if (targetPriceInput) targetPriceInput.value = data.air_target.toFixed(8);
+                    if (targetPriceInput && data.air_target) targetPriceInput.value = targetPriceInput.value || data.air_target;
 
                     const priceOscToggle = document.getElementById('price-oscillation-toggle');
                     if (priceOscToggle) priceOscToggle.checked = data.price_oscillation_enabled;
+
+                    const priceMinInput = document.getElementById('price-min-input');
+                    if (priceMinInput && data.price_min) priceMinInput.value = data.price_min;
+
+                    const priceMaxInput = document.getElementById('price-max-input');
+                    if (priceMaxInput && data.price_max) priceMaxInput.value = data.price_max;
+
+                    const priceStepInput = document.getElementById('price-step-input');
+                    if (priceStepInput && data.price_step) priceStepInput.value = data.price_step;
 
                     const microRangeToggle = document.getElementById('micro-range-toggle');
                     if (microRangeToggle && data.micro_range_enabled !== undefined) microRangeToggle.checked = data.micro_range_enabled;
 
                     const microGapInput = document.getElementById('micro-gap-input');
-                    if (microGapInput && data.micro_gap) microGapInput.value = data.micro_gap.toFixed(8);
+                    if (microGapInput && data.micro_gap) microGapInput.value = data.micro_gap;
 
                     const microWidthInput = document.getElementById('micro-width-input');
-                    if (microWidthInput && data.micro_width) microWidthInput.value = data.micro_width.toFixed(8);
+                    if (microWidthInput && data.micro_width) microWidthInput.value = data.micro_width;
                     
                     const autoPauseToggle = document.getElementById('auto-pause-toggle');
                     if (autoPauseToggle) autoPauseToggle.checked = data.auto_pause_enabled;
@@ -413,15 +801,10 @@
                     const pauseDurationInput = document.getElementById('pause-duration-input');
                     if (pauseDurationInput) pauseDurationInput.value = data.pause_duration;
 
-                    const betaRange = document.getElementById('beta-range');
-                    if (betaRange) {
-                        betaRange.value = data.beta;
-                        document.getElementById('beta-val').innerText = data.beta.toFixed(1);
-                    }
                     const intervalRange = document.getElementById('interval-range');
                     if (intervalRange) {
                         intervalRange.value = data.interval;
-                        document.getElementById('interval-val').innerText = data.interval + 's';
+                        safeSetText('interval-val', data.interval + 's');
                     }
                     isInitialized = true;
                 }
@@ -430,21 +813,19 @@
                 const h = Math.floor(data.uptime / 3600);
                 const m = Math.floor((data.uptime % 3600) / 60);
                 const s = data.uptime % 60;
-                document.getElementById('uptime-display').innerText = `Up: ${h}h ${m}m ${s}s`;
-
-                // Update Progress Bar
-                const ratioPct = Math.min((data.vol_ratio / 10) * 100, 100);
-                document.getElementById('ratio-progress').style.width = ratioPct + '%';
+                safeSetText('uptime-display', `Up: ${h}h ${m}m ${s}s`);
 
                 // Status UI
                 if(data.is_running) {
-                    document.getElementById('status-badge').innerText = 'ACTIVE';
-                    document.getElementById('status-badge').className = 'px-4 py-2 rounded-full text-xs font-semibold tracking-widest text-white uppercase toggle-active';
-                    document.getElementById('toggle-btn').innerText = 'PAUSE BOT';
+                    safeSetText('status-badge', 'ACTIVE');
+                    const badge = document.getElementById('status-badge');
+                    if (badge) badge.className = 'px-4 py-2 rounded-full text-xs font-semibold tracking-widest text-white uppercase toggle-active';
+                    safeSetText('toggle-btn', 'PAUSE BOT');
                 } else {
-                    document.getElementById('status-badge').innerText = 'STOPPED';
-                    document.getElementById('status-badge').className = 'px-4 py-2 rounded-full text-xs font-semibold tracking-widest text-white uppercase toggle-inactive';
-                    document.getElementById('toggle-btn').innerText = 'START BOT';
+                    safeSetText('status-badge', 'STOPPED');
+                    const badge = document.getElementById('status-badge');
+                    if (badge) badge.className = 'px-4 py-2 rounded-full text-xs font-semibold tracking-widest text-white uppercase toggle-inactive';
+                    safeSetText('toggle-btn', 'START BOT');
                 }
             } catch (err) { 
                 console.error('Error fetching status:', err); 
@@ -470,7 +851,7 @@
                     if(log.includes('성공')) div.className = 'text-emerald-400';
                     else if(log.includes('오류')) div.className = 'text-red-400';
                     else if(log.includes('Anchor')) div.className = 'text-blue-400';
-                    else if(log.includes('Wash')) div.className = 'text-purple-400';
+                    else if(log.includes('Wash') || log.includes('스윕')) div.className = 'text-purple-400';
                     else div.className = 'text-gray-400';
                     
                     div.innerText = log;
@@ -490,7 +871,7 @@
         async function updateParams() {
             const beta = document.getElementById('beta-range').value;
             const interval = document.getElementById('interval-range').value;
-            const target_price = document.getElementById('target-price-input').value;
+            const target_price = document.getElementById('target-price-input') ? document.getElementById('target-price-input').value : 0;
             const micro_range_enabled = document.getElementById('micro-range-toggle') ? document.getElementById('micro-range-toggle').checked : true;
             const micro_gap = document.getElementById('micro-gap-input') ? document.getElementById('micro-gap-input').value : 0.00000005;
             const micro_width = document.getElementById('micro-width-input') ? document.getElementById('micro-width-input').value : 0.00000040;
@@ -498,14 +879,47 @@
             const run_duration = document.getElementById('run-duration-input').value;
             const pause_duration = document.getElementById('pause-duration-input').value;
             
+            const price_oscillation_toggle = document.getElementById('price-oscillation-toggle');
+            const price_oscillation_enabled = price_oscillation_toggle ? price_oscillation_toggle.checked : false;
+            const price_min = parseFloat(document.getElementById('price-min-input').value) || 0;
+            const price_max = parseFloat(document.getElementById('price-max-input').value) || 0;
+            const price_step = parseFloat(document.getElementById('price-step-input').value) || 0;
+
             await fetch('/api/config', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ beta, interval, target_price, micro_range_enabled, micro_gap, micro_width, auto_pause_enabled, run_duration, pause_duration })
+                body: JSON.stringify({ 
+                    beta, interval, target_price, 
+                    micro_range_enabled, micro_gap, micro_width, 
+                    auto_pause_enabled, run_duration, pause_duration,
+                    price_oscillation_enabled, price_min, price_max, price_step
+                })
             });
-            alert('Settings Applied!');
+            alert('설정이 성공적으로 저장되었습니다!');
             isInitialized = false;
             fetchStatus();
+        }
+
+        function autoSetRange() {
+            if (!latestOrderbook || !latestOrderbook.best_bid || !latestOrderbook.best_ask) {
+                alert('오더북 데이터를 불러오는 중입니다. 잠시 후 다시 시도해 주세요.');
+                return;
+            }
+            const bid = latestOrderbook.best_bid;
+            const ask = latestOrderbook.best_ask;
+            const spread = ask - bid;
+            
+            const isHighVal = (bid >= 100);
+            const decimals = isHighVal ? 2 : (bid >= 1 ? 4 : 8);
+            const minP = parseFloat((bid * 0.998).toFixed(decimals));
+            const maxP = parseFloat((ask * 1.002).toFixed(decimals));
+            const stepVal = Math.max(spread * 0.1, (maxP - minP) * 0.04);
+            const step = parseFloat(stepVal.toFixed(decimals));
+            
+            document.getElementById('price-min-input').value = minP;
+            document.getElementById('price-max-input').value = maxP;
+            document.getElementById('price-step-input').value = step;
+            document.getElementById('price-oscillation-toggle').checked = true;
         }
 
         let latestOrderbook = null;
@@ -516,26 +930,29 @@
                 const data = await res.json();
                 latestOrderbook = data;
                 
-                document.getElementById('ob-best-bid').innerText = data.best_bid ? data.best_bid.toFixed(8) : '--';
-                document.getElementById('ob-best-ask').innerText = data.best_ask ? data.best_ask.toFixed(8) : '--';
+                const dec = (data.best_bid >= 1000) ? 2 : 4;
+                
+                safeSetText('ob-best-bid', data.best_bid ? data.best_bid.toFixed(dec) : '--');
+                safeSetText('ob-best-ask', data.best_ask ? data.best_ask.toFixed(dec) : '--');
                 
                 if (data.best_bid && data.best_ask && data.best_bid > 0) {
-                    const pct = ((data.best_ask - data.best_bid) / data.best_bid * 100).toFixed(1);
-                    document.getElementById('spread-pct').innerText = `이격 ${pct}%`;
-                    document.getElementById('safe-range-display').innerText = `${data.min_sweep.toFixed(8)} ~ ${data.max_sweep.toFixed(8)}`;
+                    const pct = ((data.best_ask - data.best_bid) / data.best_bid * 100).toFixed(2);
+                    safeSetText('spread-pct', `이격 ${pct}%`);
+                    safeSetText('safe-range-display', `${data.min_sweep.toFixed(dec)} ~ ${data.max_sweep.toFixed(dec)}`);
                 }
 
                 // If manual input is empty, auto-populate with mid price
                 const manualInput = document.getElementById('manual-price-input');
                 if (manualInput && !manualInput.value && data.mid_sweep) {
-                    manualInput.value = data.mid_sweep.toFixed(8);
+                    manualInput.value = data.mid_sweep.toFixed(dec);
                 }
             } catch (err) { console.error('Error fetching orderbook:', err); }
         }
 
         function setRecommendedPrice() {
             if (latestOrderbook && latestOrderbook.mid_sweep) {
-                document.getElementById('manual-price-input').value = latestOrderbook.mid_sweep.toFixed(8);
+                const dec = (latestOrderbook.mid_sweep >= 1000) ? 2 : 4;
+                document.getElementById('manual-price-input').value = latestOrderbook.mid_sweep.toFixed(dec);
             }
         }
 
@@ -582,6 +999,93 @@
                 fetchOrderbook();
             } catch (err) {
                 alert('주문 취소 실패: ' + err);
+            }
+        }
+
+        function scrollToGridMaker() {
+            const el = document.getElementById('grid-maker-card');
+            if (el) {
+                el.scrollIntoView({ behavior: 'smooth' });
+                el.classList.add('ring-2', 'ring-indigo-400');
+                setTimeout(() => el.classList.remove('ring-2', 'ring-indigo-400'), 1500);
+            }
+        }
+
+        function autoFillCenterPrice() {
+            const bidEl = document.getElementById('ob-best-bid');
+            const askEl = document.getElementById('ob-best-ask');
+            const targetEl = document.getElementById('target-price-display');
+
+            const bestBid = bidEl ? parseFloat(bidEl.innerText) : 0;
+            const bestAsk = askEl ? parseFloat(askEl.innerText) : 0;
+            const targetP = targetEl ? parseFloat(targetEl.innerText) : 0;
+
+            let p = 539.0;
+            if (!isNaN(bestBid) && !isNaN(bestAsk) && bestBid > 0 && bestAsk > 0 && bestBid < bestAsk && ((bestAsk - bestBid)/bestBid) < 0.1) {
+                p = (bestBid + bestAsk) / 2.0;
+            } else if (!isNaN(targetP) && targetP > 0) {
+                p = targetP;
+            }
+
+            const input = document.getElementById('grid-center-price');
+            if (input) {
+                input.value = p >= 100 ? p.toFixed(2) : (p >= 1 ? p.toFixed(4) : p.toFixed(8));
+            }
+        }
+
+        async function generateGridOrders() {
+            const btn = document.getElementById('grid-generate-btn');
+            const centerPriceInput = document.getElementById('grid-center-price');
+            const levelsInput = document.getElementById('grid-levels');
+            const stepInput = document.getElementById('grid-step');
+            const amountInput = document.getElementById('grid-amount');
+            const cancelExisting = document.getElementById('grid-cancel-existing')?.checked ?? true;
+            const organic = document.getElementById('grid-organic')?.checked ?? true;
+
+            const centerPrice = centerPriceInput && centerPriceInput.value ? parseFloat(centerPriceInput.value) : 540.5;
+            const levels = levelsInput ? parseInt(levelsInput.value) || 12 : 12;
+            const step = stepInput ? parseFloat(stepInput.value) || 0.04 : 0.04;
+            const amount = amountInput ? parseFloat(amountInput.value) || 0.02 : 0.02;
+
+            const originalHtml = btn ? btn.innerHTML : '';
+            if (btn) {
+                btn.disabled = true;
+                btn.innerHTML = '<span>⏳</span> 거래소에 호가 배치 중...';
+                btn.classList.add('opacity-60');
+            }
+
+            try {
+                const res = await fetch('/api/generate_grid', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        center_price: centerPrice,
+                        levels: levels,
+                        step: step,
+                        amount: amount,
+                        cancel_existing: cancelExisting,
+                        min_price: 540.0,
+                        max_price: 541.0,
+                        organic: organic
+                    })
+                });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    alert(`✅ ${data.message}\n(매도 ${data.created_sells.length}건, 매수 ${data.created_buys.length}건)`);
+                    fetchStatus();
+                    fetchLogs();
+                    fetchOrderbook();
+                } else {
+                    alert(`⚠️ 호가 생성 실패: ${data.message || '알 수 없는 오류'}`);
+                }
+            } catch (e) {
+                alert(`❌ 통신 오류: ${e.message}`);
+            } finally {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerHTML = originalHtml || '<span>⚡</span> 양방향 호가 오더북 생성';
+                    btn.classList.remove('opacity-60');
+                }
             }
         }
 
