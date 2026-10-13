@@ -1360,6 +1360,11 @@ class MarketMaker:
                         if next_p <= target_price or next_p == step_p:
                             break
                         step_p = next_p
+                    # 단계적 하향 조정을 모두 마친 후, 타겟가 최종 자전 발주 직전 잔고 기준점을 갱신
+                    pre_step_bals = self.get_balances()
+                    if pre_step_bals:
+                        pre_air_total = float(pre_step_bals.get(base_asset, {}).get("total", self.air_total))
+                        pre_usdt_total = float(pre_step_bals.get("USDT", {}).get("total", self.usdt_total))
                     res_sell, res_buy = self.client.place_simultaneous_wash_pair(symbol, target_price, wash_air, head_start_sec=0.03)
             except Exception as e:
                 self.log(f"⚠️ [11024 단계적 하향 예외] {e}")
