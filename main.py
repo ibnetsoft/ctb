@@ -206,8 +206,8 @@ async def get_tunnel_status():
 
 @app.post("/api/tunnel_refresh")
 async def refresh_tunnel_status():
-    tunnel_mgr.ensure_running()
-    tunnel_mgr._detect_direct_ip()
+    tunnel_mgr.start_tunnel_process()
+    tunnel_mgr.refresh_ips()
     return tunnel_mgr.get_status()
 
 @app.post("/api/toggle")
