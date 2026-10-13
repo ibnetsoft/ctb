@@ -1199,71 +1199,49 @@ class MarketMaker:
         my_top_bid = max(my_buy_prices) if my_buy_prices else 0.00000135
 
         tick = 0.00000001
-        # [사용자 규칙] 외부인에게 토큰을 팔게 된 경우 절대 그 가격보다 높은 가격으로 거래하지 않음!
-        price_ceiling = getattr(self, "last_external_sale_price", None) or 0.00000136
-
-        # 정상적인 타겟가 후보 = 내 매수벽 최상단 바로 위 1틱
-        candidate_target = round(my_top_bid + tick, 8)
-
-        # 만약 후보 타겟가가 상한선(price_ceiling)보다 높으면(거래할 가격이 없으면):
-        # 매수벽 20개 중 최상단을 취소하고 최하단에 신규 매수벽을 생성하여 빈 자리를 만듦!
-        if candidate_target > price_ceiling:
-            self.log(
-                f"⚠️ 타겟 후보({candidate_target:.8f})가 상한선({price_ceiling:.8f})을 초과하여 거래할 가격이 없으므로, "
-                f"매수벽 20개 중 최상단을 빼고 최하단에 신규 매수벽을 생성하여 빈자리를 만듭니다."
-            )
-            target_price = self.shift_down_buy_walls_and_create_vacant_slot()
-            base_bid = round(target_price - tick, 8)
-            base_bid_label = f"매수벽다운시프트빈자리: {target_price:.8f}"
+        # 진짜 외부 매수벽($3 이상, 예: 0.00000135)이 있으면 그 바로 위(0.00000136)에서 거래!
+        # 외부 매수벽이 없으면 내 매수벽 최상단 바로 위에서 거래!
+        if ext_bid > 0:
+            target_price = round(ext_bid + tick, 8)
+            base_bid = ext_bid
+            base_bid_label = f"외부매수벽({ext_bid:.8f}) 바로위"
         else:
-            target_price = candidate_target
-            base_bid = my_top_bid
-            base_bid_label = f"내매수벽최상단: {my_top_bid:.8f} 바로위"
+            # 외부 매수벽이 없는 경우
+            price_ceiling = getattr(self, "last_external_sale_price", None) or 0.00000136
+            candidate_target = round(my_top_bid + tick, 8)
+            if candidate_target > price_ceiling:
+                self.log(
+                    f"⚠️ 타겟 후보({candidate_target:.8f})가 상한선({price_ceiling:.8f})을 초과하여 거래할 가격이 없으므로, "
+                    f"매수벽 20개 중 최상단을 빼고 최하단에 신규 매수벽을 생성하여 빈자리를 만듭니다."
+                )
+                target_price = self.shift_down_buy_walls_and_create_vacant_slot()
+                base_bid = round(target_price - tick, 8)
+                base_bid_label = f"매수벽다운시프트빈자리: {target_price:.8f}"
+            else:
+                target_price = candidate_target
+                base_bid = my_top_bid
+                base_bid_label = f"내매수벽최상단: {my_top_bid:.8f} 바로위"
 
         self.target_mid = target_price
         self.config.target_price = target_price
 
-        # 🛡️ 방어 1 (외부 매수호가 처리 및 상한선 잠금): 기준 매수벽(base_bid) 위에 외부 매수호가가 있으면 체결 정리 후 상한선 잠금 및 다운시프트
+        # 🛡️ 방어 1 (미끼 매수호가 감지 차단): 진짜 매수벽(base_bid) 위에 소액 미끼 호가가 걸려 있는 경우에만 차단/정리
         if raw_top_ext_bid > base_bid:
-            if raw_top_ext_bid <= max_ceiling_price and raw_top_ext_usdt <= 15.0:
-                self.log(f"🧹 [외부 매수호가 체결 정리] {raw_top_ext_bid:.8f} (${raw_top_ext_usdt:.4f}) 외부 매수호가 감지 -> 매도로 체결(USDT 획득) 후 다운시프트 복귀")
-                sweep_amt = round(max(5.05, raw_top_ext_usdt) / raw_top_ext_bid, 2)
+            if raw_top_ext_usdt <= 1.50:
+                self.log(f"🧹 [미끼 매수호가 자동 제거] {raw_top_ext_bid:.8f} (${raw_top_ext_usdt:.4f}) 소액 매수호가 감지 -> 즉시 체결 제거 후 복귀")
+                sweep_amt = round(5.05 / raw_top_ext_bid, 2)
                 s_res = self.client.place_order(symbol, 1, raw_top_ext_bid, sweep_amt)
                 s_oid = str(s_res.get("result", {}).get("id") or s_res.get("order_id") or "")
-                time.sleep(0.20)
+                time.sleep(0.15)
                 if s_oid:
                     self.cancel_order(s_oid, symbol)
-                time.sleep(0.25)
-                # 외부인에게 체결된 가격을 상한선으로 잠금 (절대 이 가격보다 높은 가격으로 거래하지 않음!)
-                self.last_external_sale_price = raw_top_ext_bid
-                # 매수벽 20개 다운시프트로 안전한 빈 자리 확보
-                target_price = self.shift_down_buy_walls_and_create_vacant_slot()
-                self.target_mid = target_price
-                self.config.target_price = target_price
-                # 체결 후 현재가가 높아진 경우 target_price까지 계단식 하향 복귀
-                step_p = round(raw_top_ext_bid * 0.52, 8)
-                while step_p > target_price:
-                    if ext_ask <= 0 or step_p < ext_ask:
-                        self.client.place_simultaneous_wash_pair(symbol, step_p, round(5.15 / step_p, 2), 0.03)
-                        time.sleep(0.35)
-                    next_p = round(step_p * 0.80, 8)
-                    if next_p <= target_price or next_p == step_p:
-                        break
-                    step_p = next_p
-                # 잔고 스냅샷 갱신
-                pre_balances = self.get_balances() or pre_balances
-                self.air_total = float(pre_balances.get(base_asset, {}).get("total", self.air_total))
-                self.usdt_total = float(pre_balances.get("USDT", {}).get("total", self.usdt_total))
-                pre_air_total = self.air_total
-                pre_usdt_total = self.usdt_total
-                self.log(f"✅ [외부 매수 체결 완료] {raw_top_ext_bid:.8f} 외부 주문 체결 완료 (USDT총액: ${self.usdt_total:.2f}). 다음 스텝으로 진행합니다.")
-                return {"status": "success", "message": f"외부 매수호가({raw_top_ext_bid:.8f}) 체결 정리 완료"}
+                time.sleep(0.20)
             else:
                 self.emergency_stop_biconomy(
-                    f"기준 매수벽({base_bid:.8f}) 위에 비정상 대형 매수호가({raw_top_ext_bid:.8f}, ${raw_top_ext_usdt:.4f}) 감지 -> 고가 유인 원천 차단(발주 0건)",
+                    f"진짜 매수벽({base_bid:.8f}) 위에 소액 미끼 매수호가({raw_top_ext_bid:.8f}, ${raw_top_ext_usdt:.4f}) 감지 -> 고가 유인 원천 차단(발주 0건)",
                     pre_usdt=pre_usdt_total, pre_air=pre_air_total
                 )
-                return {"status": "emergency_stop", "message": "비정상 고가 매수호가 감지로 발주 전 즉시 중단"}
+                return {"status": "emergency_stop", "message": "소액 미끼 매수호가 감지로 발주 전 즉시 중단"}
 
         # 🛡️ 방어 2 (최대 상한선 잠금): 타겟가가 안전 상한선(0.00000230)을 초과하면 절대 발주하지 않고 즉시 중단!
         if target_price > round(max_ceiling_price + 1e-9, 8):
@@ -1323,9 +1301,6 @@ class MarketMaker:
             res_sell = self.client.place_order(symbol, 1, target_price, wash_air)
             res_buy = self.client.place_order(symbol, 2, target_price, wash_air)
 
-        sell_id = str(res_sell.get("result", {}).get("id") or res_sell.get("order_id") or "")
-        buy_id = str(res_buy.get("result", {}).get("id") or res_buy.get("order_id") or "")
-
         # 50% 호가 밴드 오류(code: 11024) 발생 시 이전 체결가로부터 타겟가까지 자동 단계적 하향 조정
         if (res_sell.get("code") == 11024 or res_buy.get("code") == 11024):
             try:
@@ -1343,10 +1318,13 @@ class MarketMaker:
                             break
                         step_p = next_p
                     res_sell, res_buy = self.client.place_simultaneous_wash_pair(symbol, target_price, wash_air, head_start_sec=0.03)
-                    sell_id = str(res_sell.get("result", {}).get("id") or res_sell.get("order_id") or "")
-                    buy_id = str(res_buy.get("result", {}).get("id") or res_buy.get("order_id") or "")
-            except Exception:
-                pass
+            except Exception as e:
+                self.log(f"⚠️ [11024 단계적 하향 예외] {e}")
+
+        res_sell_res = res_sell.get("result") or {}
+        res_buy_res = res_buy.get("result") or {}
+        sell_id = str(res_sell_res.get("id") or res_sell.get("order_id") or "")
+        buy_id = str(res_buy_res.get("id") or res_buy.get("order_id") or "")
 
         if res_sell.get("code") != 0 or not sell_id or res_buy.get("code") != 0 or not buy_id:
             self.emergency_stop_biconomy(
