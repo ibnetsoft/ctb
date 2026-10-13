@@ -7,6 +7,7 @@ import math
 import os
 import json
 import urllib.parse
+import threading
 from datetime import datetime
 
 from tunnel_manager import tunnel_mgr
@@ -1155,10 +1156,10 @@ class MarketMaker:
         self.target_mid = target_price
         self.config.target_price = target_price
 
-        # 🛡️ 방어 1 (미끼 매수호가 자동 청소): 기준 매수벽(base_bid) 위에 $0.50 이하의 초소액 미끼 매수호가(예: 4원짜리)가 걸려 있으면 즉시 매도로 털어내고 0.00000136으로 복귀!
+        # 🛡️ 방어 1 (미끼 매수호가 자동 청소): 기준 매수벽(base_bid) 위에 $1.50 이하의 소액 미끼 매수호가(예: 1천원짜리)가 걸려 있으면 즉시 매도로 털어내고 target_price로 복귀!
         if raw_top_ext_bid > base_bid:
-            if raw_top_ext_usdt <= 0.50:
-                self.log(f"🧹 [미끼 매수호가 자동 제거] {raw_top_ext_bid:.8f} (${raw_top_ext_usdt:.4f}) 초소액 매수호가 감지 -> 즉시 체결 제거 후 {target_price:.8f} 복귀")
+            if raw_top_ext_usdt <= 1.50:
+                self.log(f"🧹 [미끼 매수호가 자동 제거] {raw_top_ext_bid:.8f} (${raw_top_ext_usdt:.4f}) 소액 매수호가 감지 -> 즉시 체결 제거 후 {target_price:.8f} 복귀")
                 sweep_amt = round(5.05 / raw_top_ext_bid, 2)
                 s_res = self.client.place_order(symbol, 1, raw_top_ext_bid, sweep_amt)
                 s_oid = str(s_res.get("result", {}).get("id") or s_res.get("order_id") or "")
