@@ -10,3 +10,5 @@ dist/
 venv/
 .env
 config.json
+config_*.json
+tunnel/

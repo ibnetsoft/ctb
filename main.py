@@ -1,19 +1,21 @@
-from fastapi import FastAPI, BackgroundTasks, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, BackgroundTasks, WebSocket, WebSocketDisconnect, Query
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 import asyncio
 import threading
 import json
 import os
+import glob
+import re
 import sys
 import webbrowser
 import time
 from mmbot import MarketMaker, BotConfig
+from tunnel_manager import tunnel_mgr
 
 def get_resource_path(relative_path):
     """ Get absolute path to resource, works for dev and for PyInstaller """
     try:
-        # PyInstaller creates a temp folder and stores path in _MEIPASS
         base_path = sys._MEIPASS
     except Exception:
         base_path = os.path.abspath(".")
@@ -21,10 +23,75 @@ def get_resource_path(relative_path):
 
 app = FastAPI()
 
-# 글로벌 상태 공유
-config = BotConfig()
-bot = MarketMaker(config)
+# 내장 무중단 우회 터널 워치독 시작 (DigiFinex 전용 127.0.0.1:10808, Biconomy는 직결 고정 IP)
+try:
+    tunnel_mgr.start_background_watchdog()
+except Exception as e:
+    print(f"[Tunnel] 초기 기동 예외: {e}")
+
+# ── 멀티 봇 매니저 (거래소/심볼별 완전 분리 운용) ─────────────────
+configs: dict[str, BotConfig] = {}
+bots: dict[str, MarketMaker] = {}
+bot_threads: dict[str, threading.Thread] = {}
+active_bot_id: str = "digifinex"
 start_time = time.time()
+
+def register_bot(bot_id: str, config_path: str, default_exchange: str = "digifinex", default_symbol: str = "CTB_USDT", start_thread: bool = False):
+    cfg = BotConfig(config_path=config_path, bot_id=bot_id)
+    if not os.path.exists(config_path):
+        cfg.exchange = default_exchange
+        cfg.symbol = default_symbol
+        cfg.name = f"{default_exchange.upper()} ({default_symbol})"
+        if default_exchange == "biconomy":
+            cfg.target_price = 0.00004
+            cfg.price_min = 0.000035
+            cfg.price_max = 0.000045
+            cfg.price_step = 0.0000005
+            cfg.micro_gap = 0.00000005
+            cfg.micro_width = 0.0000004
+        cfg.save_config()
+    mm = MarketMaker(cfg)
+    configs[bot_id] = cfg
+    bots[bot_id] = mm
+    if start_thread and bot_id not in bot_threads:
+        t = threading.Thread(target=mm.run_mm_loop, daemon=True)
+        bot_threads[bot_id] = t
+        t.start()
+    return cfg, mm
+
+def init_all_bots():
+    # 1. 기본 DigiFinex 봇 로드 (기존 config.json 이 있으면 config_digifinex.json 생성/동기화)
+    if not os.path.exists("config_digifinex.json") and os.path.exists("config.json"):
+        try:
+            with open("config.json", "r", encoding="utf-8") as f:
+                data = json.load(f)
+            data["bot_id"] = "digifinex"
+            data["name"] = f"DIGIFINEX ({data.get('symbol', 'CTB_USDT')})"
+            with open("config_digifinex.json", "w", encoding="utf-8") as f2:
+                json.dump(data, f2, indent=4)
+        except Exception:
+            pass
+
+    register_bot("digifinex", "config_digifinex.json", default_exchange="digifinex", default_symbol="CTB_USDT")
+    register_bot("biconomy", "config_biconomy.json", default_exchange="biconomy", default_symbol="AIR_USDT")
+
+    # 추가 생성된 config_*.json 자동 검색 로드
+    for path in sorted(glob.glob("config_*.json")):
+        fname = os.path.basename(path)
+        m = re.match(r"^config_([a-zA-Z0-9_\-]+)\.json$", fname)
+        if m:
+            bid = m.group(1).lower()
+            if bid not in bots:
+                register_bot(bid, path)
+
+init_all_bots()
+
+def resolve_bot(bot_id: str = None, data: dict = None) -> tuple[str, BotConfig, MarketMaker]:
+    global active_bot_id
+    bid = bot_id or (data.get("bot_id") if isinstance(data, dict) else None) or active_bot_id
+    if bid not in bots:
+        bid = active_bot_id if active_bot_id in bots else next(iter(bots.keys()))
+    return bid, configs[bid], bots[bid]
 
 # ── 바인딩 및 라우트 ──────────────────────────────
 @app.get("/")
@@ -33,9 +100,66 @@ async def get_dashboard():
     with open(path, "r", encoding="utf-8") as f:
         return HTMLResponse(content=f.read())
 
-@app.get("/api/status")
-async def get_status():
+@app.get("/api/bots")
+async def list_bots():
+    items = []
+    for bid, cfg in configs.items():
+        mm = bots[bid]
+        items.append({
+            "bot_id": bid,
+            "name": cfg.name or f"{cfg.exchange.upper()} ({cfg.symbol})",
+            "exchange": cfg.exchange,
+            "symbol": cfg.symbol,
+            "base_asset": mm.get_base_asset_name(),
+            "is_running": cfg.is_running,
+            "usdt_total": getattr(mm, "usdt_total", mm.usdt_bal),
+            "air_total": getattr(mm, "air_total", mm.air_bal),
+            "last_status": mm.last_status
+        })
     return {
+        "active_bot_id": active_bot_id,
+        "bots": items
+    }
+
+@app.post("/api/bots/select")
+async def select_bot(data: dict):
+    global active_bot_id
+    bid = str(data.get("bot_id", "")).strip().lower()
+    if bid not in bots:
+        return {"status": "error", "message": f"존재하지 않는 봇 ID입니다: {bid}"}
+    active_bot_id = bid
+    return {"status": "success", "active_bot_id": active_bot_id}
+
+@app.post("/api/bots/create")
+async def create_bot(data: dict):
+    global active_bot_id
+    exchange = str(data.get("exchange", "digifinex")).strip().lower()
+    symbol = str(data.get("symbol", "TOKEN_USDT")).strip().upper()
+    raw_id = str(data.get("bot_id", "")).strip().lower()
+    if not raw_id:
+        raw_id = re.sub(r"[^a-z0-9_\-]", "_", f"{exchange}_{symbol.lower()}")
+    if raw_id in bots:
+        return {"status": "error", "message": f"이미 존재하는 봇 ID입니다: {raw_id}"}
+    config_path = f"config_{raw_id}.json"
+    cfg, mm = register_bot(raw_id, config_path, default_exchange=exchange, default_symbol=symbol, start_thread=True)
+    cfg.exchange = exchange
+    cfg.symbol = symbol
+    cfg.name = data.get("name") or f"{exchange.upper()} ({symbol})"
+    if data.get("api_key"):
+        cfg.api_key = str(data["api_key"]).strip()
+    if data.get("secret_key"):
+        cfg.secret_key = str(data["secret_key"]).strip()
+    cfg.save_config()
+    mm.init_client()
+    active_bot_id = raw_id
+    return {"status": "success", "bot_id": raw_id, "active_bot_id": active_bot_id}
+
+@app.get("/api/status")
+async def get_status(bot_id: str = Query(default=None)):
+    bid, config, bot = resolve_bot(bot_id=bot_id)
+    return {
+        "bot_id": bid,
+        "bot_name": config.name or f"{config.exchange.upper()} ({config.symbol})",
         "exchange": config.exchange,
         "symbol": config.symbol,
         "base_asset": bot.get_base_asset_name(),
@@ -62,40 +186,65 @@ async def get_status():
         "price_oscillation_enabled": config.price_oscillation_enabled,
         "price_min": config.price_min,
         "price_max": config.price_max,
-        "price_step": config.price_step
+        "price_step": config.price_step,
+        "tunnel": tunnel_mgr.get_status(),
+        "bots": [
+            {
+                "bot_id": k,
+                "name": c.name or f"{c.exchange.upper()} ({c.symbol})",
+                "exchange": c.exchange,
+                "symbol": c.symbol,
+                "is_running": c.is_running
+            }
+            for k, c in configs.items()
+        ]
     }
 
+@app.get("/api/tunnel_status")
+async def get_tunnel_status():
+    return tunnel_mgr.get_status()
+
+@app.post("/api/tunnel_refresh")
+async def refresh_tunnel_status():
+    tunnel_mgr.ensure_running()
+    tunnel_mgr._detect_direct_ip()
+    return tunnel_mgr.get_status()
+
 @app.post("/api/toggle")
-async def toggle_bot():
+async def toggle_bot(bot_id: str = Query(default=None), data: dict = {}):
+    bid, config, bot = resolve_bot(bot_id=bot_id, data=data)
     config.is_running = not config.is_running
-    return {"is_running": config.is_running}
+    return {"bot_id": bid, "is_running": config.is_running}
 
 @app.post("/api/manual_sweep")
-async def manual_sweep(data: dict = {}):
+async def manual_sweep(bot_id: str = Query(default=None), data: dict = {}):
+    bid, config, bot = resolve_bot(bot_id=bot_id, data=data)
     price = float(data.get("price", 0)) if data.get("price") else None
     amount_usdt = float(data.get("amount_usdt", 15.0))
     res = bot.execute_manual_sweep(sweep_price=price, usdt_amount=amount_usdt)
     return res
 
 @app.post("/api/cancel_all")
-async def cancel_all():
+async def cancel_all(bot_id: str = Query(default=None), data: dict = {}):
+    bid, config, bot = resolve_bot(bot_id=bot_id, data=data)
     count = bot.cancel_all_orders(config.symbol)
     balances = bot.get_balances()
     if balances:
         base_asset = bot.get_base_asset_name()
         bot.air_bal = float(balances.get(base_asset, {}).get("available", "0"))
         bot.usdt_bal = float(balances.get("USDT", {}).get("available", "0"))
-    return {"status": "success", "cancelled_count": count, "usdt_bal": bot.usdt_bal, "air_bal": bot.air_bal}
+    return {"status": "success", "bot_id": bid, "cancelled_count": count, "usdt_bal": bot.usdt_bal, "air_bal": bot.air_bal}
 
 @app.post("/api/generate_grid")
-async def generate_grid(data: dict = {}):
-    center_price = float(data.get("center_price")) if data.get("center_price") else 540.5
+async def generate_grid(bot_id: str = Query(default=None), data: dict = {}):
+    bid, config, bot = resolve_bot(bot_id=bot_id, data=data)
+    center_price = float(data.get("center_price")) if data.get("center_price") else config.target_price
     levels = int(data.get("levels", 12))
-    step = float(data.get("step", 0.04))
+    step = float(data.get("step", config.price_step or 0.04))
     amount = float(data.get("amount", 0.02))
     cancel_existing = bool(data.get("cancel_existing", True))
-    min_price = float(data.get("min_price", 540.0))
-    max_price = float(data.get("max_price", 541.0))
+    min_price = float(data.get("min_price", config.price_min or 540.0))
+    max_price = float(data.get("max_price", config.price_max or 541.0))
     organic = bool(data.get("organic", True))
     
     res = bot.generate_orderbook_grid(
@@ -111,7 +260,8 @@ async def generate_grid(data: dict = {}):
     return res
 
 @app.get("/api/orderbook")
-async def get_orderbook():
+async def get_orderbook(bot_id: str = Query(default=None)):
+    bid, config, bot = resolve_bot(bot_id=bot_id)
     ob = bot.get_orderbook(config.symbol)
     raw_bids = ob.get("bids", [])
     raw_asks = ob.get("asks", [])
@@ -121,14 +271,17 @@ async def get_orderbook():
     best_bid = float(bids[0][0]) if bids else 0.0
     best_ask = float(asks[0][0]) if asks else 0.0
     spread = max(0.0, best_ask - best_bid) if (bids and asks) else 0.0
-    margin = max(0.00000002, spread * 0.04)
-    min_sweep = round(best_bid + margin, 4)
-    max_sweep = round(best_ask - margin, 4)
+    dec = 4 if (config.price_min >= 1.0 or best_bid >= 1.0) else 8
+    box_pad = 0.002 if dec == 4 else (config.price_max - config.price_min) * 0.005
+    margin = max(10 ** (-dec), spread * 0.04)
+    min_sweep = round(best_bid + margin, dec)
+    max_sweep = round(best_ask - margin, dec)
     if config.price_min > 0 and config.price_max > 0:
-        min_sweep = max(min_sweep, round(config.price_min + 0.002, 4))
-        max_sweep = min(max_sweep, round(config.price_max - 0.002, 4))
-    mid_sweep = round((best_bid + best_ask) / 2.0, 4)
+        min_sweep = max(min_sweep, round(config.price_min + box_pad, dec))
+        max_sweep = min(max_sweep, round(config.price_max - box_pad, dec))
+    mid_sweep = round((best_bid + best_ask) / 2.0, dec)
     return {
+        "bot_id": bid,
         "best_bid": best_bid,
         "best_ask": best_ask,
         "spread": spread,
@@ -140,7 +293,8 @@ async def get_orderbook():
     }
 
 @app.post("/api/config")
-async def update_config(data: dict):
+async def update_config(data: dict, bot_id: str = Query(default=None)):
+    bid, config, bot = resolve_bot(bot_id=bot_id, data=data)
     if "exchange" in data: config.exchange = str(data["exchange"]).lower()
     if "symbol" in data: config.symbol = str(data["symbol"])
     if "beta" in data: config.beta = float(data["beta"])
@@ -168,13 +322,17 @@ async def update_config(data: dict):
         config.run_duration = int(data["run_duration"])
     if "pause_duration" in data:
         config.pause_duration = int(data["pause_duration"])
+    config.name = f"{config.exchange.upper()} ({config.symbol})"
     config.save_config()
     bot.init_client()
-    return {"status": "success"}
+    return {"status": "success", "bot_id": bid}
 
 @app.get("/api/settings")
-async def get_settings():
+async def get_settings(bot_id: str = Query(default=None)):
+    bid, config, bot = resolve_bot(bot_id=bot_id)
     return {
+        "bot_id": bid,
+        "name": config.name or f"{config.exchange.upper()} ({config.symbol})",
         "exchange": config.exchange,
         "symbol": config.symbol,
         "api_key": config.api_key[:4] + "*" * (len(config.api_key)-8) + config.api_key[-4:] if config.api_key else "",
@@ -196,7 +354,8 @@ async def get_settings():
     }
 
 @app.post("/api/settings")
-async def save_settings(data: dict):
+async def save_settings(data: dict, bot_id: str = Query(default=None)):
+    bid, config, bot = resolve_bot(bot_id=bot_id, data=data)
     # 실제 키가 입력된 경우만 업데이트 (마스킹된 값 무시)
     if "exchange" in data: config.exchange = str(data["exchange"]).lower()
     if "symbol" in data: config.symbol = str(data["symbol"])
@@ -229,12 +388,14 @@ async def save_settings(data: dict):
     if "pause_duration" in data:
         config.pause_duration = int(data["pause_duration"])
     
+    config.name = f"{config.exchange.upper()} ({config.symbol})"
     config.save_config()
     bot.init_client()
-    return {"status": "success"}
+    return {"status": "success", "bot_id": bid}
 
 @app.post("/api/test_telegram")
-async def test_telegram():
+async def test_telegram(bot_id: str = Query(default=None), data: dict = {}):
+    bid, config, bot = resolve_bot(bot_id=bot_id, data=data)
     if not config.telegram_token or not config.telegram_chat_id:
         return {"status": "error", "message": "설정 정보가 부족합니다."}
     
@@ -242,7 +403,8 @@ async def test_telegram():
     return {"status": "success"}
 
 @app.get("/api/test_connection")
-async def test_connection():
+async def test_connection(bot_id: str = Query(default=None)):
+    bid, config, bot = resolve_bot(bot_id=bot_id)
     if not config.api_key or not config.secret_key:
         return {
             "status": "error",
@@ -293,6 +455,7 @@ async def test_connection():
         
         return {
             "status": "success",
+            "bot_id": bid,
             "exchange": config.exchange,
             "symbol": symbol,
             "base_asset": base_asset,
@@ -322,13 +485,11 @@ async def test_connection():
         }
 
 @app.get("/api/logs")
-async def get_logs():
-    return {"logs": config.logs[-50:]}
+async def get_logs(bot_id: str = Query(default=None)):
+    bid, config, bot = resolve_bot(bot_id=bot_id)
+    return {"bot_id": bid, "logs": config.logs[-50:]}
 
-# ── 백그라운드 봇 가동 ───────────────────────────
-def start_bot():
-    bot.run_mm_loop()
-
+# ── 백그라운드 멀티 봇 가동 ───────────────────────────
 def open_browser():
     """브라우저 자동 열기"""
     time.sleep(1.5) # 서버 부팅 대기
@@ -336,15 +497,16 @@ def open_browser():
 
 @app.on_event("startup")
 async def startup_event():
-    # 봇을 별도의 스레드에서 실행
-    thread = threading.Thread(target=start_bot, daemon=True)
-    thread.start()
+    # 등록된 모든 봇을 각각의 독립 스레드에서 실행 (서로 간섭 없이 동시 가동 가능)
+    for bid, mm in bots.items():
+        if bid not in bot_threads:
+            t = threading.Thread(target=mm.run_mm_loop, daemon=True)
+            bot_threads[bid] = t
+            t.start()
     
-    # 브라우저 열기 스레드
-    threading.Thread(target=open_browser, daemon=True).start()
+    if os.environ.get("NO_BROWSER") != "1":
+        threading.Thread(target=open_browser, daemon=True).start()
 
 if __name__ == "__main__":
     import uvicorn
-    # 외부 접근 허용을 위해 0.0.0.0 권장하나, 로컬 전용이면 127.0.0.1도 가능
     uvicorn.run(app, host="0.0.0.0", port=8050)
-

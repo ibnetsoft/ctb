@@ -9,30 +9,60 @@ import json
 import urllib.parse
 from datetime import datetime
 
+from tunnel_manager import tunnel_mgr
+
 # ── 거래소 클라이언트 인터페이스 ─────────────────────────────────
 
 class DigiFinexClient:
-    """디지파이넥스(DigiFinex) API v3 연동 클라이언트"""
+    """디지파이넥스(DigiFinex) API v3 연동 클라이언트 (내장 무중단 우회 터널 자동 연동)"""
+    FALLBACK_URLS = [
+        "https://openapi.digifinex.com",
+        "https://openapi.digifinex.vip",
+        "https://openapi.digifinex.io"
+    ]
+
     def __init__(self, api_key: str, secret_key: str, log_func=None):
         self.api_key = api_key
         self.secret_key = secret_key
-        self.base_url = "https://openapi.digifinex.com"
+        self.base_url = self.FALLBACK_URLS[0]
         self.log = log_func or print
         self.time_offset = 0
+        self.session = requests.Session()
+        self.session.trust_env = False
+        self.session.headers.update({"Connection": "keep-alive"})
+        tunnel_mgr.start_tunnel_process()
         self.sync_time()
+
+    def _request(self, method: str, url: str, **kwargs):
+        """내장 우회 터널(127.0.0.1:10808)을 우선 사용하며, 실패 시 직결로 즉시 폴백합니다."""
+        proxies = tunnel_mgr.proxies_dict if tunnel_mgr.is_running else {}
+        if proxies:
+            try:
+                return self.session.request(method, url, proxies=proxies, **kwargs)
+            except Exception:
+                pass
+        return self.session.request(method, url, **kwargs)
 
     def sync_time(self):
         """거래소 서버 시간과 로컬 PC 시간 오차를 동기화합니다."""
-        try:
-            res = requests.get(f"{self.base_url}/v3/time", timeout=5)
-            data = res.json()
-            if data.get("code") == 0 and "server_time" in data:
-                server_ts = int(data["server_time"])
-                local_ts = int(time.time())
-                self.time_offset = server_ts - local_ts
-                self.log(f"[DigiFinex] 서버 시간 동기화 완료 (오차: {self.time_offset}초)")
-        except Exception as e:
-            self.log(f"[DigiFinex] 서버 시간 동기화 실패: {e}")
+        last_err = None
+        for url in self.FALLBACK_URLS:
+            try:
+                res = self._request("GET", f"{url}/v3/time", timeout=5)
+                if res.status_code != 200:
+                    last_err = f"HTTP {res.status_code} ({url})"
+                    continue
+                data = res.json()
+                if data.get("code") == 0 and "server_time" in data:
+                    self.base_url = url
+                    server_ts = int(data["server_time"])
+                    local_ts = int(time.time())
+                    self.time_offset = server_ts - local_ts
+                    self.log(f"[DigiFinex] 서버 시간 동기화 완료 (오차: {self.time_offset}초 | 내장 우회터널 연동)")
+                    return
+            except Exception as e:
+                last_err = e
+        self.log(f"[DigiFinex] 서버 시간 동기화 실패: {last_err}")
 
     def _sign(self, param_str: str) -> str:
         return hmac.new(
@@ -61,7 +91,10 @@ class DigiFinexClient:
             if query_str:
                 url += f"?{query_str}"
             try:
-                res = requests.get(url, headers=headers, timeout=10)
+                res = self._request("GET", url, headers=headers, timeout=10)
+                if res.status_code in (451, 403) and attempt == 0:
+                    self.sync_time()
+                    continue
                 data = res.json()
                 if data.get("code") == 10008 and attempt == 0:
                     self.log("[DigiFinex] 타임스탬프 오차(10008) 감지, 시간 재동기화 후 재시도...")
@@ -84,7 +117,10 @@ class DigiFinexClient:
             headers = self._headers(sign)
             url = f"{self.base_url}{endpoint}"
             try:
-                res = requests.post(url, data=body_str, headers=headers, timeout=10)
+                res = self._request("POST", url, data=body_str, headers=headers, timeout=10)
+                if res.status_code in (451, 403) and attempt == 0:
+                    self.sync_time()
+                    continue
                 result = res.json()
                 if result.get("code") == 10008 and attempt == 0:
                     self.log("[DigiFinex] 타임스탬프 오차(10008) 감지, 시간 재동기화 후 재시도...")
@@ -100,8 +136,16 @@ class DigiFinexClient:
 
     def get_orderbook(self, symbol: str) -> dict:
         sym = symbol.lower()
+        now = time.time()
+        if hasattr(self, "_cached_orderbook") and hasattr(self, "_cached_orderbook_time"):
+            if now - self._cached_orderbook_time < 1.5 and self._cached_orderbook.get("bids"):
+                return self._cached_orderbook
         try:
-            res = requests.get(f"{self.base_url}/v3/order_book", params={"symbol": sym}, timeout=10)
+            res = self._request("GET", f"{self.base_url}/v3/order_book", params={"symbol": sym}, timeout=10)
+            if res.status_code != 200:
+                if hasattr(self, "_cached_orderbook") and self._cached_orderbook.get("bids"):
+                    return self._cached_orderbook
+                return {"bids": [], "asks": []}
             data = res.json()
             # DigiFinex: {"code": 0, "bids": [[price, amount], ...], "asks": [[price, amount], ...]}
             # 주의: DigiFinex는 asks를 내림차순(높은 가격부터)으로 반환하므로 반드시 오름차순(최저가부터)으로 정렬해야 함!
@@ -109,15 +153,24 @@ class DigiFinexClient:
             raw_asks = data.get("asks", [])
             bids = sorted(raw_bids, key=lambda x: float(x[0]), reverse=True)
             asks = sorted(raw_asks, key=lambda x: float(x[0]), reverse=False)
-            return {
+            res_dict = {
                 "bids": bids,
                 "asks": asks
             }
+            self._cached_orderbook = res_dict
+            self._cached_orderbook_time = now
+            return res_dict
         except Exception as e:
+            if hasattr(self, "_cached_orderbook") and self._cached_orderbook.get("bids"):
+                return self._cached_orderbook
             self.log(f"[DigiFinex] 오더북 조회 실패: {e}")
             return {"bids": [], "asks": []}
 
     def get_balances(self) -> dict:
+        now = time.time()
+        if hasattr(self, "_cached_balances") and hasattr(self, "_cached_balances_time"):
+            if now - self._cached_balances_time < 2.0 and self._cached_balances:
+                return self._cached_balances
         res = self.private_get("/v3/spot/assets")
         balances = {}
         if res.get("code") == 0:
@@ -130,6 +183,10 @@ class DigiFinexClient:
                     "total": total,
                     "freeze": str(max(0.0, float(total) - float(free)))
                 }
+            self._cached_balances = balances
+            self._cached_balances_time = now
+        elif hasattr(self, "_cached_balances") and self._cached_balances:
+            return self._cached_balances
         return balances
 
     def get_open_orders(self, symbol: str) -> list:
@@ -203,7 +260,7 @@ class DigiFinexClient:
 
     def get_btc_stats(self) -> tuple:
         try:
-            res = requests.get(f"{self.base_url}/v3/ticker", params={"symbol": "btc_usdt"}, timeout=10)
+            res = self._request("GET", f"{self.base_url}/v3/ticker", params={"symbol": "btc_usdt"}, timeout=10)
             data = res.json()
             ticker_list = data.get("ticker", [])
             if ticker_list:
@@ -215,12 +272,18 @@ class DigiFinexClient:
 
 
 class BiconomyClient:
-    """바이코노미(Biconomy) API v1 연동 클라이언트"""
+    """바이코노미(Biconomy) API v1 연동 클라이언트 (Keep-Alive 초고속 세션 + 직결 고정 IP)"""
     def __init__(self, api_key: str, secret_key: str, log_func=None):
         self.api_key = api_key
         self.secret_key = secret_key
         self.base_url = "https://api.biconomy.com"
         self.log = log_func or print
+        self.session = requests.Session()
+        self.session.trust_env = False
+        self.session.headers.update({"X-SITE-ID": "127", "Connection": "keep-alive"})
+        self.fast_session2 = requests.Session()
+        self.fast_session2.trust_env = False
+        self.fast_session2.headers.update({"X-SITE-ID": "127", "Connection": "keep-alive"})
 
     def make_sign(self, params: dict) -> str:
         sorted_params = sorted(params.items())
@@ -228,12 +291,13 @@ class BiconomyClient:
         query += f"&secret_key={self.secret_key}"
         return hashlib.md5(query.encode()).hexdigest().upper()
 
-    def private_post(self, endpoint: str, params: dict) -> dict:
-        params["api_key"] = self.api_key
-        params["sign"] = self.make_sign(params)
-        headers = {"X-SITE-ID": "127"}
+    def private_post(self, endpoint: str, params: dict, use_secondary_session: bool = False) -> dict:
+        payload = dict(params)
+        payload["api_key"] = self.api_key
+        payload["sign"] = self.make_sign(payload)
+        sess = self.fast_session2 if use_secondary_session else self.session
         try:
-            res = requests.post(self.base_url + endpoint, data=params, headers=headers, timeout=10)
+            res = sess.post(self.base_url + endpoint, data=payload, timeout=10)
             result = res.json()
             if result.get("code") != 0 and result.get("code") != 10:
                 self.log(f"[Biconomy] API 오류 [{endpoint}]: {result}")
@@ -242,14 +306,48 @@ class BiconomyClient:
             self.log(f"[Biconomy] 네트워크 오류 [{endpoint}]: {e}")
             return {}
 
+    def place_simultaneous_wash_pair(self, symbol: str, price: float, amount: float, head_start_sec: float = 0.03) -> tuple:
+        """
+        Keep-Alive된 2개의 독립 세션으로 선매도(side=1)와 후매수(side=2)를 0.03초 시차로 동시 병렬 발사하여
+        외부 스나이핑 봇이 호가창을 보고 끼어들 1초의 틈을 원천 제거합니다.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+        sym = symbol.upper()
+        p_str = "{:.8f}".format(round(price, 8))
+        a_str = "{:.3f}".format(round(amount, 3))
+
+        def _fire_sell():
+            res = self.private_post("/api/v1/private/trade/limit", {
+                "market": sym, "side": 1, "price": p_str, "amount": a_str
+            }, use_secondary_session=False)
+            if res.get("code") == 0:
+                self.log(f"[Biconomy] 초고속 선매도 성공: {price:.8f} | 수량: {amount}")
+            return res
+
+        def _fire_buy():
+            time.sleep(head_start_sec)
+            res = self.private_post("/api/v1/private/trade/limit", {
+                "market": sym, "side": 2, "price": p_str, "amount": a_str
+            }, use_secondary_session=True)
+            if res.get("code") == 0:
+                self.log(f"[Biconomy] 초고속 후매수 성공: {price:.8f} | 수량: {amount}")
+            return res
+
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            f_sell = ex.submit(_fire_sell)
+            f_buy = ex.submit(_fire_buy)
+            res_sell = f_sell.result()
+            res_buy = f_buy.result()
+        return res_sell, res_buy
+
     def get_orderbook(self, symbol: str) -> dict:
         sym = symbol.upper()
         try:
-            res = requests.get(f"{self.base_url}/api/v1/depth", params={"symbol": sym}, timeout=10)
+            res = self.session.get(f"{self.base_url}/api/v1/depth", params={"symbol": sym}, timeout=10)
             data = res.json()
-            result = data.get("result", {})
-            raw_bids = result.get("bids", [])
-            raw_asks = result.get("asks", [])
+            result = data.get("result") if isinstance(data.get("result"), dict) else data
+            raw_bids = result.get("bids", []) if isinstance(result, dict) else []
+            raw_asks = result.get("asks", []) if isinstance(result, dict) else []
             bids = sorted(raw_bids, key=lambda x: float(x[0]), reverse=True)
             asks = sorted(raw_asks, key=lambda x: float(x[0]), reverse=False)
             return {"bids": bids, "asks": asks}
@@ -275,7 +373,14 @@ class BiconomyClient:
                     records = result_obj.get("records", [])
                     if not records:
                         break
-                    all_orders.extend(records)
+                    for item in records:
+                        side_val = str(item.get("side", "")).lower()
+                        all_orders.append({
+                            "id": str(item.get("id", "")),
+                            "price": float(item.get("price", 0)),
+                            "amount": float(item.get("amount", 0)),
+                            "side": "buy" if side_val in ["buy", "2"] else "sell"
+                        })
                     if len(records) < limit:
                         break
                     offset += limit
@@ -327,8 +432,10 @@ class BiconomyClient:
 # ── 설정 클래스 ───────────────────────────────────────────────
 
 class BotConfig:
-    def __init__(self, config_path="config.json"):
+    def __init__(self, config_path="config.json", bot_id=None, name=None):
         self.config_path = config_path
+        self.bot_id = bot_id or "digifinex"
+        self.name = name or ""
         self.exchange = "digifinex"  # 기본 거래소: digifinex 또는 biconomy
         self.api_key = ""
         self.secret_key = ""
@@ -361,6 +468,8 @@ class BotConfig:
             try:
                 with open(self.config_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
+                    self.bot_id = data.get("bot_id", self.bot_id)
+                    self.name = data.get("name", self.name)
                     self.exchange = data.get("exchange", self.exchange).lower()
                     self.symbol = data.get("symbol", self.symbol)
                     self.api_key = data.get("api_key", self.api_key)
@@ -379,11 +488,15 @@ class BotConfig:
                     self.auto_pause_enabled = bool(data.get("auto_pause_enabled", self.auto_pause_enabled))
                     self.run_duration = int(data.get("run_duration", self.run_duration))
                     self.pause_duration = int(data.get("pause_duration", self.pause_duration))
+                    if not self.name:
+                        self.name = f"{self.exchange.upper()} ({self.symbol})"
             except Exception as e:
                 print(f"설정 파일 로드 실패: {e}")
 
     def save_config(self):
         data = {
+            "bot_id": self.bot_id,
+            "name": self.name or f"{self.exchange.upper()} ({self.symbol})",
             "exchange": self.exchange,
             "symbol": self.symbol,
             "api_key": self.api_key,
@@ -406,6 +519,10 @@ class BotConfig:
         try:
             with open(self.config_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=4)
+            # 기본 digifinex 봇은 레거시 호환을 위해 config.json에도 동기화
+            if self.bot_id == "digifinex" and self.config_path != "config.json":
+                with open("config.json", "w", encoding="utf-8") as f2:
+                    json.dump(data, f2, indent=4)
         except Exception as e:
             print(f"설정 파일 저장 실패: {e}")
 
@@ -488,8 +605,10 @@ class MarketMaker:
     def place_order(self, symbol: str, side: int, price: float, amount: float):
         # 🛡️ 박스권 절대 강제 방어: 설정된 min/max 범위를 벗어나는 모든 주문 원천 차단
         if self.config.price_min > 0 and self.config.price_max > 0:
-            if price < (self.config.price_min - 0.0001) or price > (self.config.price_max + 0.0001):
-                self.log(f"🚨 [박스권 강제 차단] 주문 가격({price:.4f})이 박스권 [{self.config.price_min:.4f} ~ {self.config.price_max:.4f}] 밖이므로 발주를 전면 차단합니다.")
+            dec = 4 if self.config.price_min >= 1.0 else 8
+            tol = 0.0001 if self.config.price_min >= 1.0 else 1e-8
+            if price < (self.config.price_min - tol) or price > (self.config.price_max + tol):
+                self.log(f"🚨 [박스권 강제 차단] 주문 가격({price:.{dec}f})이 박스권 [{self.config.price_min:.{dec}f} ~ {self.config.price_max:.{dec}f}] 밖이므로 발주를 전면 차단합니다.")
                 return {"code": -999, "message": f"Box range violation: {price} not in [{self.config.price_min}, {self.config.price_max}]"}
         return self.client.place_order(symbol, side, price, amount)
 
@@ -499,7 +618,7 @@ class MarketMaker:
     def cancel_all_orders(self, symbol: str):
         return self.client.cancel_all_orders(symbol)
 
-    def update_orderbook_seamlessly(self, center_price: float = None, levels: int = 12, min_price: float = 540.0, max_price: float = 541.0) -> dict:
+    def update_orderbook_seamlessly(self, center_price: float = None, levels: int = 12, min_price: float = None, max_price: float = None) -> dict:
         """
         호가창을 절대 전부 비우지 않고(No Full Wipe), 기존 호가의 대다수를 유지하면서
         중심가 이동에 따라 필요한 호가만 추가(Add First)하고 외곽/충돌 호가만 선별 정리(Prune)하는 점진적 무중단 슬라이딩 알고리즘.
@@ -508,10 +627,15 @@ class MarketMaker:
         symbol = self.config.symbol
         min_p = float(min_price) if min_price else (self.config.price_min or 540.0)
         max_p = float(max_price) if max_price else (self.config.price_max or 541.0)
+        dec = 4 if min_p >= 1.0 else 8
+        box_span = max(10 ** (-dec), max_p - min_p)
+        scale = 1.0 if min_p >= 1.0 else box_span
+        tol = 0.0001 if min_p >= 1.0 else 1e-8
+
         if center_price is None or center_price <= 0:
-            center_price = round((min_p + max_p) / 2.0, 4)
+            center_price = round((min_p + max_p) / 2.0, dec)
         else:
-            center_price = round(float(center_price), 4)
+            center_price = round(float(center_price), dec)
 
         # 1. 현재 열려 있는 주문 실시간 조회
         try:
@@ -524,31 +648,31 @@ class MarketMaker:
         existing_sells = []
         inner_conflicts = []
 
-        # 안쪽 충돌 임계치 (스프레드 확보: 체결을 위해 center_price 주변 최소 0.010 이상 공간 확보)
-        inner_gap = 0.010
+        # 안쪽 충돌 임계치 (스프레드 확보: 체결을 위해 center_price 주변 최소 0.010 * scale 이상 공간 확보)
+        inner_gap = 0.010 * scale
 
         for o in cur_orders:
             try:
-                p = round(float(o.get("price", 0)), 4)
+                p = round(float(o.get("price", 0)), dec)
                 side = str(o.get("side", "")).lower()
                 oid = str(o.get("id", ""))
                 amt = float(o.get("amount", 0))
 
                 # 박스권 [min_p, max_p] 밖이면 즉시 취소 대상
-                if p < (min_p - 0.0001) or p > (max_p + 0.0001):
-                    inner_conflicts.append((oid, f"박스권 외({p:.4f})"))
+                if p < (min_p - tol) or p > (max_p + tol):
+                    inner_conflicts.append((oid, f"박스권 외({p:.{dec}f})"))
                     continue
 
                 if side == "sell":
                     # 매도 주문이 새로운 중심가보다 아래이거나 너무 가까우면 취소 대상 (충돌 방지)
                     if p <= (center_price + inner_gap):
-                        inner_conflicts.append((oid, f"중심가 근접 매도({p:.4f})"))
+                        inner_conflicts.append((oid, f"중심가 근접 매도({p:.{dec}f})"))
                     else:
                         existing_sells.append({"id": oid, "price": p, "amount": amt})
                 elif side == "buy":
                     # 매수 주문이 새로운 중심가보다 위이거나 너무 가까우면 취소 대상 (충돌 방지)
                     if p >= (center_price - inner_gap):
-                        inner_conflicts.append((oid, f"중심가 근접 매수({p:.4f})"))
+                        inner_conflicts.append((oid, f"중심가 근접 매수({p:.{dec}f})"))
                     else:
                         existing_buys.append({"id": oid, "price": p, "amount": amt})
             except Exception:
@@ -573,15 +697,16 @@ class MarketMaker:
         if needed_asks > 0:
             existing_sell_prices = [x["price"] for x in existing_sells]
             span_ask = (max_p - center_price) * 0.95
-            step_ask_avg = max(0.015, span_ask / (levels + 1))
-            curr_ask = center_price + max(0.015, inner_gap + 0.005)
+            step_ask_avg = max(0.015 * scale, span_ask / (levels + 1))
+            curr_ask = center_price + max(0.015 * scale, inner_gap + 0.005 * scale)
             
             candidates = []
             for _ in range(levels * 3):
                 curr_ask += random.uniform(0.65, 1.35) * step_ask_avg
-                p = round(min(max_p - 0.002, curr_ask), 4)
-                if p > (center_price + inner_gap) and not any(abs(p - ex) < 0.006 for ex in (existing_sell_prices + [c[0] for c in candidates])):
-                    candidates.append((p, round(random.uniform(0.0185, 0.0255), 4)))
+                p = round(min(max_p - 0.002 * scale, curr_ask), dec)
+                if p > (center_price + inner_gap) and not any(abs(p - ex) < (0.006 * scale) for ex in (existing_sell_prices + [c[0] for c in candidates])):
+                    amt_val = round(random.uniform(0.0185, 0.0255), 4) if min_p >= 1.0 else round(random.uniform(10.0, 14.0) / max(p, 1e-8), 3)
+                    candidates.append((p, amt_val))
                 if len(candidates) >= needed_asks:
                     break
 
@@ -600,15 +725,16 @@ class MarketMaker:
         if needed_bids > 0:
             existing_buy_prices = [x["price"] for x in existing_buys]
             span_bid = (center_price - min_p) * 0.95
-            step_bid_avg = max(0.015, span_bid / (levels + 1))
-            curr_bid = center_price - max(0.015, inner_gap + 0.005)
+            step_bid_avg = max(0.015 * scale, span_bid / (levels + 1))
+            curr_bid = center_price - max(0.015 * scale, inner_gap + 0.005 * scale)
 
             candidates = []
             for _ in range(levels * 3):
                 curr_bid -= random.uniform(0.65, 1.35) * step_bid_avg
-                p = round(max(min_p + 0.002, curr_bid), 4)
-                if p < (center_price - inner_gap) and not any(abs(p - ex) < 0.006 for ex in (existing_buy_prices + [c[0] for c in candidates])):
-                    candidates.append((p, round(random.uniform(0.0185, 0.0255), 4)))
+                p = round(max(min_p + 0.002 * scale, curr_bid), dec)
+                if p < (center_price - inner_gap) and not any(abs(p - ex) < (0.006 * scale) for ex in (existing_buy_prices + [c[0] for c in candidates])):
+                    amt_val = round(random.uniform(0.0185, 0.0255), 4) if min_p >= 1.0 else round(random.uniform(10.0, 14.0) / max(p, 1e-8), 3)
+                    candidates.append((p, amt_val))
                 if len(candidates) >= needed_bids:
                     break
 
@@ -649,7 +775,7 @@ class MarketMaker:
 
         total_added = len(created_buys) + len(created_sells)
         total_pruned = len(inner_conflicts)
-        self.log(f"🌊 [점진적 무중단 호가 갱신] 중심: {center_price:.4f} | 보충: +{total_added}건 (매수 {len(created_buys)}, 매도 {len(created_sells)}) | 정리: -{total_pruned}건 | 호가창 상태: 상시 유지")
+        self.log(f"🌊 [점진적 무중단 호가 갱신] 중심: {center_price:.{dec}f} | 보충: +{total_added}건 (매수 {len(created_buys)}, 매도 {len(created_sells)}) | 정리: -{total_pruned}건 | 호가창 상태: 상시 유지")
 
         return {
             "status": "success",
@@ -663,7 +789,7 @@ class MarketMaker:
             "message": f"점진적 무중단 12단계 호가 유지 완료 (+{total_added}건, -{total_pruned}건)"
         }
 
-    def generate_orderbook_grid(self, center_price: float = None, levels: int = 12, step: float = 0.04, amount_per_order: float = 0.02, cancel_existing: bool = False, min_price: float = 540.0, max_price: float = 541.0, organic: bool = True) -> dict:
+    def generate_orderbook_grid(self, center_price: float = None, levels: int = 12, step: float = 0.04, amount_per_order: float = 0.02, cancel_existing: bool = False, min_price: float = None, max_price: float = None, organic: bool = True) -> dict:
         """
         호가창 그리드 생성 메서드:
         호가창이 깨끗이 비워지는 일이 없도록 전체 취소를 하지 않고 update_orderbook_seamlessly를 호출하여 점진적으로 보충/교체합니다.
@@ -677,7 +803,8 @@ class MarketMaker:
         """
         min_p = self.config.price_min or 540.0
         max_p = self.config.price_max or 541.0
-        center_p = self.config.target_price or round((min_p + max_p) / 2.0, 4)
+        dec = 4 if min_p >= 1.0 else 8
+        center_p = self.config.target_price or round((min_p + max_p) / 2.0, dec)
         
         try:
             orders = self.get_open_orders(self.config.symbol)
@@ -687,7 +814,6 @@ class MarketMaker:
             if len(buys) < (levels - 1) or len(sells) < (levels - 1):
                 self.update_orderbook_seamlessly(center_price=center_p, levels=levels, min_price=min_p, max_price=max_p)
         except Exception as e:
-            self.log(f"호가 유지 관리 오류: {e}")
             self.log(f"⚠️ 호가 유지 관리 중 오류: {e}")
 
     def calculate_next_organic_price(self) -> float:
@@ -695,16 +821,18 @@ class MarketMaker:
         100+ 다채로운 시장 시뮬레이션 파동 엔진:
         - 6대 시장 국면 (상승 추세, 하락 추세, 박스권 횡보, 변동성 급등락, 풀백 반등, 불규칙 브라운 운동)
         - 마르코프 체인 기반 확률적 국면 전환 (외부에서 다음 틱의 방향을 예측 불가능)
-        - 소수점 4자리 완전 불규칙 지터링으로 중복 가격 발생 원천 방지
-        - 설정된 박스권 [540.08 ~ 540.92] 내부 엄격 안전 유지
+        - 소수점 불규칙 지터링으로 중복 가격 발생 원천 방지
+        - 설정된 박스권 내부 엄격 안전 유지
         """
         min_p = self.config.price_min or 540.0
         max_p = self.config.price_max or 541.0
-        safe_min = round(min_p + 0.08, 4)
-        safe_max = round(max_p - 0.08, 4)
+        dec = 4 if min_p >= 1.0 else 8
+        scale = 1.0 if min_p >= 1.0 else max(1e-8, max_p - min_p)
+        safe_min = round(min_p + 0.08 * scale, dec)
+        safe_max = round(max_p - 0.08 * scale, dec)
 
         if not hasattr(self, 'organic_price') or self.organic_price < safe_min or self.organic_price > safe_max:
-            self.organic_price = round((safe_min + safe_max) / 2.0, 4)
+            self.organic_price = round((safe_min + safe_max) / 2.0, dec)
             self.regime = "RANDOM_WALK"
             self.regime_steps_left = random.randint(3, 7)
             self.momentum = 0.0
@@ -713,9 +841,9 @@ class MarketMaker:
         if self.regime_steps_left <= 0:
             regimes = ["TREND_UP", "TREND_DOWN", "CHOPPY_RANGE", "RANDOM_WALK", "VOLATILITY_SURGE", "PULLBACK_REVERSAL"]
             # 경계 근처일 때 반대 방향으로 자연스럽게 회귀
-            if self.organic_price > (safe_max - 0.12):
+            if self.organic_price > (safe_max - 0.12 * scale):
                 weights = [0.05, 0.45, 0.25, 0.10, 0.05, 0.10]
-            elif self.organic_price < (safe_min + 0.12):
+            elif self.organic_price < (safe_min + 0.12 * scale):
                 weights = [0.45, 0.05, 0.25, 0.10, 0.05, 0.10]
             else:
                 weights = [0.22, 0.22, 0.20, 0.18, 0.09, 0.09]
@@ -725,35 +853,35 @@ class MarketMaker:
 
         # 국면별 가격 변동폭 (단위: USDT)
         if self.regime == "TREND_UP":
-            delta = random.uniform(0.012, 0.038) + random.gauss(0, 0.005)
+            delta = (random.uniform(0.012, 0.038) + random.gauss(0, 0.005)) * scale
         elif self.regime == "TREND_DOWN":
-            delta = -random.uniform(0.012, 0.038) + random.gauss(0, 0.005)
+            delta = (-random.uniform(0.012, 0.038) + random.gauss(0, 0.005)) * scale
         elif self.regime == "CHOPPY_RANGE":
-            delta = random.uniform(-0.016, 0.016)
+            delta = random.uniform(-0.016, 0.016) * scale
         elif self.regime == "VOLATILITY_SURGE":
             direction = 1 if random.random() < 0.5 else -1
-            delta = direction * random.uniform(0.035, 0.065)
+            delta = direction * random.uniform(0.035, 0.065) * scale
         elif self.regime == "PULLBACK_REVERSAL":
-            delta = -self.momentum * random.uniform(0.6, 1.2) if abs(self.momentum) > 0.008 else random.uniform(-0.02, 0.02)
+            delta = -self.momentum * random.uniform(0.6, 1.2) if abs(self.momentum) > (0.008 * scale) else random.uniform(-0.02, 0.02) * scale
         else: # RANDOM_WALK
-            delta = random.gauss(0, 0.020)
+            delta = random.gauss(0, 0.020) * scale
 
-        # 소수점 4자리 완전 불규칙 미세 노이즈
-        micro_jitter = random.uniform(-0.0040, 0.0040)
+        # 완전 불규칙 미세 노이즈
+        micro_jitter = random.uniform(-0.0040, 0.0040) * scale
         raw_next = self.organic_price + delta + micro_jitter
 
         # 박스권 상/하단 소프트 바운스
         if raw_next > safe_max:
-            raw_next = safe_max - random.uniform(0.01, 0.04)
+            raw_next = safe_max - random.uniform(0.01, 0.04) * scale
             self.regime = "TREND_DOWN"
             self.regime_steps_left = random.randint(4, 8)
         elif raw_next < safe_min:
-            raw_next = safe_min + random.uniform(0.01, 0.04)
+            raw_next = safe_min + random.uniform(0.01, 0.04) * scale
             self.regime = "TREND_UP"
             self.regime_steps_left = random.randint(4, 8)
 
         self.momentum = delta
-        self.organic_price = round(raw_next, 4)
+        self.organic_price = round(raw_next, dec)
         return self.organic_price
 
     def get_base_asset_name(self) -> str:
@@ -761,10 +889,312 @@ class MarketMaker:
         parts = self.config.symbol.replace("/", "_").split("_")
         return parts[0].upper() if len(parts) > 0 else "AIR"
 
+    def find_external_best_orders(self, symbol: str, min_wall_usdt: float = 3.0) -> tuple:
+        """
+        내 미체결 주문(매수벽 20개 등)을 제외한 순수 외부 유저의 최우선 매수호가(valid_ext_bid, 최소 $3 이상 진짜 매수벽)와
+        소액 미끼 호가를 포함한 최상단 외부 매수호가(raw_top_ext_bid, raw_top_ext_usdt),
+        최우선 매도호가(external_best_ask)를 정밀 계산합니다.
+        """
+        open_orders = self.get_open_orders(symbol)
+        ob = self.get_orderbook(symbol)
+        bids = ob.get("bids", []) if ob else []
+        asks = ob.get("asks", []) if ob else []
+
+        my_bids = {}
+        my_asks = {}
+        for o in open_orders:
+            try:
+                p = round(float(o.get("price", 0)), 8)
+                amt = float(o.get("amount", 0))
+                side = str(o.get("side", "")).lower()
+                if side == "buy":
+                    my_bids[p] = my_bids.get(p, 0.0) + amt
+                else:
+                    my_asks[p] = my_asks.get(p, 0.0) + amt
+            except Exception:
+                continue
+
+        valid_ext_bid = 0.0
+        raw_top_ext_bid = 0.0
+        raw_top_ext_usdt = 0.0
+
+        for b in bids:
+            try:
+                p = round(float(b[0]), 8)
+                total_amt = float(b[1])
+                my_amt = my_bids.get(p, 0.0)
+                ext_amt = total_amt - my_amt
+                if ext_amt > 0.1:
+                    ext_usdt = p * ext_amt
+                    if raw_top_ext_bid <= 0:
+                        raw_top_ext_bid = p
+                        raw_top_ext_usdt = ext_usdt
+                    # 최소 $3.0 이상인 호가만 진짜 외부 매수벽으로 인정 (4.5원짜리 미끼 호가 필터링)
+                    if ext_usdt >= min_wall_usdt:
+                        valid_ext_bid = p
+                        break
+            except Exception:
+                continue
+
+        external_best_ask = 0.0
+        for a in asks:
+            try:
+                p = round(float(a[0]), 8)
+                total_amt = float(a[1])
+                my_amt = my_asks.get(p, 0.0)
+                if (total_amt - my_amt) > 1.0:
+                    external_best_ask = p
+                    break
+            except Exception:
+                continue
+
+        return valid_ext_bid, external_best_ask, open_orders, ob, raw_top_ext_bid, raw_top_ext_usdt
+
+    def emergency_stop_biconomy(self, reason: str, cancel_ids: list = None, pre_usdt: float = None, pre_air: float = None):
+        """
+        외부 유저 물량과의 체결 또는 호가 침범 감지 시 즉시 자전 잔여 주문을 취소하고,
+        USDT 및 코인 잔고 변화량을 상세히 로그에 남긴 뒤 봇을 비상 정지합니다.
+        (기존 매수벽 20개는 절대 취소하지 않고 보존)
+        """
+        symbol = self.config.symbol
+        base_asset = self.get_base_asset_name()
+        if cancel_ids:
+            for oid in cancel_ids:
+                if oid:
+                    try:
+                        self.cancel_order(str(oid), symbol)
+                        time.sleep(0.05)
+                    except Exception:
+                        pass
+
+        self.config.is_running = False
+        self.last_status = f"🚨 비상 중단: {reason}"
+
+        # 취소 직후 최신 잔고 조회 및 변화량 계산
+        bal_report = ""
+        try:
+            time.sleep(0.15)
+            balances = self.get_balances()
+            if balances:
+                self.air_bal = float(balances.get(base_asset, {}).get("available", "0"))
+                self.air_freeze = float(balances.get(base_asset, {}).get("freeze", "0"))
+                self.air_total = float(balances.get(base_asset, {}).get("total", self.air_bal + self.air_freeze))
+                self.usdt_bal = float(balances.get("USDT", {}).get("available", "0"))
+                self.usdt_freeze = float(balances.get("USDT", {}).get("freeze", "0"))
+                self.usdt_total = float(balances.get("USDT", {}).get("total", self.usdt_bal + self.usdt_freeze))
+
+                init_usdt = getattr(self, "initial_usdt_total", 857.71097347)
+                init_air = getattr(self, "initial_air_total", 2886245369.568)
+                step_usdt_diff = (self.usdt_total - pre_usdt) if pre_usdt is not None else 0.0
+                step_air_diff = (self.air_total - pre_air) if pre_air is not None else 0.0
+                total_usdt_diff = self.usdt_total - init_usdt
+                total_air_diff = self.air_total - init_air
+
+                bal_report = (
+                    f"📊 [비상 중단 잔고 변화] 현재 USDT 총액: ${self.usdt_total:.4f} (가용: ${self.usdt_bal:.4f}, 매수벽동결: ${self.usdt_freeze:.2f}) | "
+                    f"이번 스텝 ΔUSDT: {step_usdt_diff:+.4f}$ (최초대비 누적 ΔUSDT: {total_usdt_diff:+.4f}$) | "
+                    f"이번 스텝 Δ{base_asset}: {step_air_diff:+,.2f} (최초대비 누적 Δ{base_asset}: {total_air_diff:+,.2f})"
+                )
+        except Exception as e:
+            bal_report = f"⚠️ 비상 중단 잔고 조회 오류: {e}"
+
+        msg = f"🚨 [비상 중단 - 외부 물량 보호] {reason} -> 거래를 즉시 중단했습니다."
+        self.log(msg)
+        if bal_report:
+            self.log(bal_report)
+        self.send_telegram(msg + ("\n" + bal_report if bal_report else ""))
+
+    def execute_biconomy_safe_wash_step(self, custom_usdt: float = None) -> dict:
+        """
+        Biconomy (AIR_USDT) 전용 안전 자전거래 1회 실행:
+        1원칙: 외부 유저 주문과는 절대 거래하지 않음 (하단 매수벽 20개는 그대로 유지)
+        2원칙: 진짜 외부 매수벽($3 이상, 현재 0.00000228) 바로 위(+0.00000001 = 0.00000229)에서 $5.1~$5.5 불규칙 동시 자전(시차 0.03초)
+        3원칙: 소액 미끼 호가 출현, 안전 상한선(0.00000230) 초과, 또는 외부 물량 개입 시 주문 전/즉시 비상 중단
+        """
+        symbol = self.config.symbol
+        base_asset = self.get_base_asset_name()
+        max_ceiling_price = 0.00000230
+
+        # 0. 자전 전 잔고 스냅샷 확보
+        pre_balances = self.get_balances()
+        if not pre_balances:
+            return {"status": "error", "message": "잔고 조회 실패"}
+
+        self.air_bal = float(pre_balances.get(base_asset, {}).get("available", "0"))
+        self.air_freeze = float(pre_balances.get(base_asset, {}).get("freeze", "0"))
+        self.air_total = float(pre_balances.get(base_asset, {}).get("total", self.air_bal + self.air_freeze))
+        self.usdt_bal = float(pre_balances.get("USDT", {}).get("available", "0"))
+        self.usdt_freeze = float(pre_balances.get("USDT", {}).get("freeze", "0"))
+        self.usdt_total = float(pre_balances.get("USDT", {}).get("total", self.usdt_bal + self.usdt_freeze))
+
+        if not hasattr(self, "initial_usdt_total") or self.initial_usdt_total <= 0:
+            self.initial_usdt_total = 857.71097347
+            self.initial_air_total = 2886245369.568
+
+        pre_air_total = self.air_total
+        pre_usdt_total = self.usdt_total
+
+        if self.usdt_bal < 6.0:
+            self.log(f"⚠️ 가용 USDT 부족 ({self.usdt_bal:.2f} USDT). 대기합니다.")
+            return {"status": "error", "message": f"가용 USDT 부족 ({self.usdt_bal:.2f} USDT)"}
+
+        # 1. 외부 최우선 매수호가($3 이상 진짜 매수벽) 및 상단 미끼 호가 탐색
+        ext_bid, ext_ask, pre_open_orders, ob, raw_top_ext_bid, raw_top_ext_usdt = self.find_external_best_orders(symbol, min_wall_usdt=3.0)
+        if ext_bid <= 0:
+            self.log("⚠️ 외부 유저 매수호가($3 이상)를 찾을 수 없어 대기합니다.")
+            return {"status": "error", "message": "외부 매수호가 없음"}
+
+        pre_wall_ids = {str(o.get("id")) for o in pre_open_orders if o.get("id")}
+
+        # 타겟 자전 가격 = 진짜 외부 매수벽 바로 위 가격 (+0.00000001)
+        tick = 0.00000001
+        target_price = round(ext_bid + tick, 8)
+        self.target_mid = target_price
+        self.config.target_price = target_price
+
+        # 🛡️ 방어 1 (미끼 매수호가 감지 차단): 진짜 매수벽(예: 0.00000228) 위에 $3 미만의 소액 미끼 매수호가(예: 0.00000380에 4.5원어치)가 걸려 있으면 절대 따라 올라가지 않고 발주 전 즉시 중단!
+        if raw_top_ext_bid > ext_bid:
+            self.emergency_stop_biconomy(
+                f"진짜 매수벽({ext_bid:.8f}) 위에 소액 미끼 매수호가({raw_top_ext_bid:.8f}, ${raw_top_ext_usdt:.4f}) 감지 -> 고가 유인 원천 차단(발주 0건)",
+                pre_usdt=pre_usdt_total, pre_air=pre_air_total
+            )
+            return {"status": "emergency_stop", "message": "소액 미끼 매수호가 감지로 발주 전 즉시 중단"}
+
+        # 🛡️ 방어 2 (최대 상한선 잠금): 타겟가가 안전 상한선(0.00000230)을 초과하면 절대 발주하지 않고 즉시 중단!
+        if target_price > round(max_ceiling_price + 1e-9, 8):
+            self.emergency_stop_biconomy(
+                f"타겟가({target_price:.8f})가 안전 상한선({max_ceiling_price:.8f})을 초과 -> 고가 유인 원천 차단(발주 0건)",
+                pre_usdt=pre_usdt_total, pre_air=pre_air_total
+            )
+            return {"status": "emergency_stop", "message": "안전 상한선 초과로 발주 전 즉시 중단"}
+
+        # 🛡️ 방어 3 (매도벽 충돌 차단): 타겟 가격이 외부 매도호가 이상이면 즉시 중단
+        if ext_ask > 0 and target_price >= round(ext_ask - 1e-9, 8):
+            self.emergency_stop_biconomy(
+                f"타겟가({target_price:.8f})가 외부 매도1호가({ext_ask:.8f})에 도달/충돌",
+                pre_usdt=pre_usdt_total, pre_air=pre_air_total
+            )
+            return {"status": "emergency_stop", "message": "외부 매도호가 충돌 위험으로 즉시 중단"}
+
+        # 2. 불규칙 거래 금액 산출 ($5.10 ~ $5.50 사이 불규칙)
+        if custom_usdt and custom_usdt > 0:
+            wash_usdt = round(float(custom_usdt), 4)
+        else:
+            wash_usdt = round(random.uniform(5.10, 5.50), 4)
+        wash_air = round(wash_usdt / target_price, 2)
+
+        if self.air_bal < wash_air:
+            self.log(f"⚠️ 가용 {base_asset} 부족 ({self.air_bal:,.2f} < {wash_air:,.2f}). 대기합니다.")
+            return {"status": "error", "message": f"가용 {base_asset} 부족"}
+
+        # 안전 검증 4: 발사 직전 호가창 최종 재확인
+        ob_pre = self.get_orderbook(symbol)
+        bids_pre = ob_pre.get("bids", []) if ob_pre else []
+        asks_pre = ob_pre.get("asks", []) if ob_pre else []
+        if not bids_pre:
+            return {"status": "error", "message": "오더북 재확인 실패"}
+
+        top_bid_now = round(float(bids_pre[0][0]), 8)
+        if top_bid_now >= target_price:
+            self.emergency_stop_biconomy(
+                f"발주 직전 타겟가({target_price:.8f}) 이상에 외부 매수호가({top_bid_now:.8f}) 출현 (발주 0건)",
+                pre_usdt=pre_usdt_total, pre_air=pre_air_total
+            )
+            return {"status": "emergency_stop", "message": "외부 매수호가 침범으로 즉시 중단"}
+
+        if asks_pre:
+            top_ask_now = round(float(asks_pre[0][0]), 8)
+            if top_ask_now <= target_price:
+                self.emergency_stop_biconomy(
+                    f"발주 직전 타겟가({target_price:.8f}) 이하에 외부 매도호가({top_ask_now:.8f}) 출현 (발주 0건)",
+                    pre_usdt=pre_usdt_total, pre_air=pre_air_total
+                )
+                return {"status": "emergency_stop", "message": "외부 매도호가 침범으로 즉시 중단"}
+
+        # 3. ⚡ 초고속 병렬 동시 발주 (Keep-Alive 듀얼 세션으로 선매도 + 후매수 0.03초 시차 동시 발사)
+        if hasattr(self.client, "place_simultaneous_wash_pair"):
+            res_sell, res_buy = self.client.place_simultaneous_wash_pair(symbol, target_price, wash_air, head_start_sec=0.03)
+        else:
+            res_sell = self.client.place_order(symbol, 1, target_price, wash_air)
+            res_buy = self.client.place_order(symbol, 2, target_price, wash_air)
+
+        sell_id = str(res_sell.get("result", {}).get("id") or res_sell.get("order_id") or "")
+        buy_id = str(res_buy.get("result", {}).get("id") or res_buy.get("order_id") or "")
+
+        if res_sell.get("code") != 0 or not sell_id or res_buy.get("code") != 0 or not buy_id:
+            self.emergency_stop_biconomy(
+                f"동시 자전 발주 중 일부 실패(sell={res_sell}, buy={res_buy})로 잔여 긴급 회수",
+                cancel_ids=[sell_id, buy_id], pre_usdt=pre_usdt_total, pre_air=pre_air_total
+            )
+            return {"status": "emergency_stop", "message": "주문 발주 오류로 비상 중단"}
+
+        time.sleep(0.20)
+
+        # 5. 체결 후 외부 개입 여부 정밀 감사 (Open Orders & Balance Delta)
+        post_open_orders = self.get_open_orders(symbol)
+        post_open_ids = {str(o.get("id")) for o in post_open_orders if o.get("id")}
+
+        # 5-1) 방금 넣은 선매도(sell_id)나 후매수(buy_id)가 미체결로 남아 있다면 외부 물량과 엉킨 것!
+        if sell_id in post_open_ids or buy_id in post_open_ids:
+            self.emergency_stop_biconomy(
+                f"자전 주문({target_price:.8f}) 중 미체결 잔량 발생 (외부 물량 개입 감지)",
+                cancel_ids=[sell_id, buy_id], pre_usdt=pre_usdt_total, pre_air=pre_air_total
+            )
+            return {"status": "emergency_stop", "message": "미체결 잔량 감지(외부 개입)로 즉시 중단"}
+
+        # 5-2) 기존 매수벽(pre_wall_ids) 중 체결되어 사라진 주문이 있는지 확인
+        missing_walls = pre_wall_ids - post_open_ids
+        if missing_walls:
+            self.emergency_stop_biconomy(
+                f"기존 매수벽 주문 중 {len(missing_walls)}건이 외부와 체결됨 감지",
+                pre_usdt=pre_usdt_total, pre_air=pre_air_total
+            )
+            return {"status": "emergency_stop", "message": "매수벽 외부 체결 감지로 즉시 중단"}
+
+        # 5-3) 자전 전후 총 잔고(USDT / AIR) 변화량 감사 (순수 자전이면 수수료 외 잔고 변동이 없어야 함)
+        post_balances = self.get_balances()
+        if post_balances:
+            self.air_bal = float(post_balances.get(base_asset, {}).get("available", "0"))
+            self.air_freeze = float(post_balances.get(base_asset, {}).get("freeze", "0"))
+            self.air_total = float(post_balances.get(base_asset, {}).get("total", self.air_bal + self.air_freeze))
+            self.usdt_bal = float(post_balances.get("USDT", {}).get("available", "0"))
+            self.usdt_freeze = float(post_balances.get("USDT", {}).get("freeze", "0"))
+            self.usdt_total = float(post_balances.get("USDT", {}).get("total", self.usdt_bal + self.usdt_freeze))
+
+            usdt_diff = abs(self.usdt_total - pre_usdt_total)
+            air_diff = abs(self.air_total - pre_air_total)
+            # 수수료(약 $0.01~0.03) 범위를 넘어 $0.50 이상 또는 주문수량의 5% 이상 변동 시 외부 거래로 판정
+            if usdt_diff > 0.50 or air_diff > (wash_air * 0.05):
+                self.emergency_stop_biconomy(
+                    f"자전 전후 잔고 비정상 변동 감지 (ΔUSDT={usdt_diff:.4f}, Δ{base_asset}={air_diff:,.2f}) - 외부 체결 의심",
+                    pre_usdt=pre_usdt_total, pre_air=pre_air_total
+                )
+                return {"status": "emergency_stop", "message": "외부 물량 체결 감지로 즉시 중단"}
+
+        self.last_status = f"Active ({target_price:.8f} | ${wash_usdt:.2f})"
+        self.log(
+            f"✅ [Biconomy 무결점 자전 완료] 외부최우선매수: {ext_bid:.8f} -> 체결가: {target_price:.8f} | "
+            f"수량: {wash_air:,.2f} {base_asset} (${wash_usdt:.2f}) | USDT총액: ${self.usdt_total:.2f} (변화 0)"
+        )
+        return {
+            "status": "success",
+            "price": target_price,
+            "external_best_bid": ext_bid,
+            "external_best_ask": ext_ask,
+            "amount": wash_air,
+            "usdt": wash_usdt,
+            "best_bid": ext_bid,
+            "best_ask": ext_ask,
+            "message": f"자전 체결 완료: {target_price:.8f} (${wash_usdt:.2f})"
+        }
+
     def execute_manual_sweep(self, sweep_price: float = None, usdt_amount: float = 15.0) -> dict:
         """
         수동 1회 즉시 스윕 거래 실행 (100% 선매도 + 오더북 최저가 검증 + 후매수 스윕)
         """
+        if self.config.exchange.lower() == "biconomy":
+            return self.execute_biconomy_safe_wash_step(custom_usdt=usdt_amount if usdt_amount and usdt_amount < 10 else None)
+
         symbol = self.config.symbol
         ob = self.get_orderbook(symbol)
         bids = ob.get('bids', []) if ob else []
@@ -783,27 +1213,32 @@ class MarketMaker:
         # 박스권 절대 강제 방어
         min_p = self.config.price_min or 540.0
         max_p = self.config.price_max or 541.0
+        dec = 4 if min_p >= 1.0 else 8
+        box_pad = 0.002 if min_p >= 1.0 else (max_p - min_p) * 0.005
+        margin = max(10 ** (-dec), spread * 0.05)
+        min_sweep = best_bid + margin
+        max_sweep = best_ask - margin
         
         # 외부 물량(5000 등)과 격리: 스프레드 범위를 박스권 내부로 엄격 클램핑
-        min_sweep = max(min_sweep, min_p + 0.002)
-        max_sweep = min(max_sweep, max_p - 0.002)
+        min_sweep = max(min_sweep, min_p + box_pad)
+        max_sweep = min(max_sweep, max_p - box_pad)
 
         if sweep_price is None or sweep_price <= 0:
-            sweep_price = round((min_sweep + max_sweep) / 2.0, 4)
+            sweep_price = round((min_sweep + max_sweep) / 2.0, dec)
         else:
-            sweep_price = round(sweep_price, 4)
+            sweep_price = round(sweep_price, dec)
             
         if not (min_p <= sweep_price <= max_p):
             return {
                 "status": "error",
-                "message": f"가격 오류: 스윕 가격({sweep_price:.4f})이 박스권 [{min_p:.4f} ~ {max_p:.4f}] 범위를 벗어났습니다."
+                "message": f"가격 오류: 스윕 가격({sweep_price:.{dec}f})이 박스권 [{min_p:.{dec}f} ~ {max_p:.{dec}f}] 범위를 벗어났습니다."
             }
             
         # 매수벽 < 스윕가 < 매도벽 사이 엄격 검증
         if not (best_bid < sweep_price < best_ask):
             return {
                 "status": "error",
-                "message": f"가격 오류: 스윕 가격({sweep_price:.4f})은 매수벽({best_bid:.4f})과 매도벽({best_ask:.4f}) 사이에 위치해야 합니다."
+                "message": f"가격 오류: 스윕 가격({sweep_price:.{dec}f})은 매수벽({best_bid:.{dec}f})과 매도벽({best_ask:.{dec}f}) 사이에 위치해야 합니다."
             }
 
         # 잔고 확인
@@ -816,7 +1251,9 @@ class MarketMaker:
         if self.usdt_bal < 10.0:
             return {"status": "error", "message": f"가용 USDT가 10달러 미만입니다 ({self.usdt_bal:.2f} USDT)."}
 
-        wash_air = round(wash_usdt / sweep_price, 4)
+        wash_usdt = min(float(usdt_amount or 15.0), self.usdt_bal * 0.95)
+        amt_dec = 4 if sweep_price >= 1.0 else 3
+        wash_air = round(wash_usdt / sweep_price, amt_dec)
         if sweep_price >= 100:
             p_str = f"{sweep_price:.4f}"
         elif sweep_price >= 1:
@@ -895,7 +1332,8 @@ class MarketMaker:
         while True:
             # 봇 정지 상태 확인 (대시보드 제어용: 사용자가 START 버튼을 눌러야만 실행)
             if not self.config.is_running:
-                self.last_status = "Stopped (Standby)"
+                if not str(self.last_status).startswith("🚨"):
+                    self.last_status = "Stopped (Standby)"
                 self.auto_pause_state_start = time.time()
                 time.sleep(1)
                 continue
@@ -927,6 +1365,27 @@ class MarketMaker:
                 remaining_sec = max(0, remaining_sec)
                 self.last_status = f"Auto Paused (Resumes in {remaining_sec}s)"
                 time.sleep(2)
+                continue
+
+            # ── Biconomy (AIR_USDT) 전용 전략 루프 ────────────────────────
+            if self.config.exchange.lower() == "biconomy":
+                try:
+                    self.current_btc_p, self.current_btc_v = self.client.get_btc_stats()
+                    res = self.execute_biconomy_safe_wash_step()
+                    if not self.config.is_running or res.get("status") == "emergency_stop":
+                        continue
+
+                    # 15초 ~ 30초 불규칙 간격 대기 (0.5초 단위로 정지 신호 반응)
+                    wait_sec = round(random.uniform(15.0, 30.0), 2)
+                    self.log(f"⏱️ [Biconomy 대기] 다음 자전거래까지 {wait_sec:.2f}초 불규칙 대기...")
+                    waited = 0.0
+                    while waited < wait_sec and self.config.is_running:
+                        step_s = min(0.5, wait_sec - waited)
+                        time.sleep(step_s)
+                        waited += step_s
+                except Exception as e:
+                    self.log(f"[Biconomy 루프 오류] {e}")
+                    time.sleep(5)
                 continue
 
             try:
@@ -990,11 +1449,15 @@ class MarketMaker:
 
                     # 1. 100+ 패턴 다채로운 유기적 가격 엔진으로 다음 체결 목표가 산출
                     target_price = self.calculate_next_organic_price()
+                    min_p_cfg = self.config.price_min or 540.0
+                    max_p_cfg = self.config.price_max or 541.0
+                    dec = 4 if min_p_cfg >= 1.0 else 8
+                    scale = 1.0 if min_p_cfg >= 1.0 else max(1e-8, max_p_cfg - min_p_cfg)
 
                     # 2. 호가창 유동적 동기화:
-                    # target_price가 현재 호가 스프레드(best_bid ~ best_ask) 밖이거나 스프레드가 0.07 이상 벌어졌다면,
-                    if not (best_bid < target_price < best_ask) or spread > 0.07:
-                        self.log(f"🌊 [호가망 점진 이동] 체결 파동({target_price:.4f})에 맞춰 호가창 무중단 점진 재배치 (스프레드: {best_bid:.4f} ~ {best_ask:.4f})")
+                    # target_price가 현재 호가 스프레드(best_bid ~ best_ask) 밖이거나 스프레드가 0.07 * scale 이상 벌어졌다면,
+                    if not (best_bid < target_price < best_ask) or spread > (0.07 * scale):
+                        self.log(f"🌊 [호가망 점진 이동] 체결 파동({target_price:.{dec}f})에 맞춰 호가창 무중단 점진 재배치 (스프레드: {best_bid:.{dec}f} ~ {best_ask:.{dec}f})")
                         self.update_orderbook_seamlessly(center_price=target_price, levels=12, min_price=self.config.price_min, max_price=self.config.price_max)
                         time.sleep(0.4)
                         ob = self.get_orderbook(symbol)
@@ -1010,19 +1473,19 @@ class MarketMaker:
                     self.maintain_orderbook_grid(levels=12)
 
                     # 3. 스윕 체결 가격 결정 (스프레드 내부 안전 마진 클램프)
-                    margin = max(0.0001, spread * 0.05)
-                    min_sweep = round(best_bid + margin, 4)
-                    max_sweep = round(best_ask - margin, 4)
+                    margin = max(10 ** (-dec), spread * 0.05)
+                    min_sweep = round(best_bid + margin, dec)
+                    max_sweep = round(best_ask - margin, dec)
                     if min_sweep >= max_sweep:
-                        sweep_price = round((best_bid + best_ask) / 2.0, 4)
+                        sweep_price = round((best_bid + best_ask) / 2.0, dec)
                     else:
-                        sweep_price = round(max(min_sweep, min(target_price, max_sweep)), 4)
+                        sweep_price = round(max(min_sweep, min(target_price, max_sweep)), dec)
 
-                    # 박스권 절대 강제선 [540.0, 541.0]
+                    # 박스권 절대 강제선
                     if self.config.price_min > 0 and self.config.price_max > 0:
-                        safe_lo = round(self.config.price_min + 0.05, 4)
-                        safe_hi = round(self.config.price_max - 0.05, 4)
-                        sweep_price = round(max(safe_lo, min(sweep_price, safe_hi)), 4)
+                        safe_lo = round(self.config.price_min + 0.05 * scale, dec)
+                        safe_hi = round(self.config.price_max - 0.05 * scale, dec)
+                        sweep_price = round(max(safe_lo, min(sweep_price, safe_hi)), dec)
 
                     self.target_mid = sweep_price
                     self.config.target_price = sweep_price
@@ -1049,20 +1512,21 @@ class MarketMaker:
                     wash_usdt = min(wash_usdt, self.usdt_bal * 0.90)
                     if wash_usdt < 8.0:
                         wash_usdt = 8.0
-                    wash_air = round(wash_usdt / sweep_price, 4)
-                    p_str = f"{sweep_price:.4f}"
-                    amt_str = f"{wash_air:.4f}"
+                    amt_dec = 4 if sweep_price >= 1.0 else 3
+                    wash_air = round(wash_usdt / sweep_price, amt_dec)
+                    p_str = f"{sweep_price:.{dec}f}"
+                    amt_str = f"{wash_air:.{amt_dec}f}"
 
                     # 4-1) 선매도 발주 직전 실시간 오더북 침범 사전 차단
                     ob_pre = self.get_orderbook(symbol)
                     bids_pre = ob_pre.get('bids', []) if ob_pre else []
                     asks_pre = ob_pre.get('asks', []) if ob_pre else []
-                    if bids_pre and round(float(bids_pre[0][0]), 4) >= round(sweep_price, 4):
-                        self.log(f"🚨 [외부 매수 침범 감지] 외부 매수가({float(bids_pre[0][0]):.4f})가 스윕가({sweep_price:.4f}) 이상으로 침범하여 발주를 보류합니다.")
+                    if bids_pre and round(float(bids_pre[0][0]), dec) >= round(sweep_price, dec):
+                        self.log(f"🚨 [외부 매수 침범 감지] 외부 매수가({float(bids_pre[0][0]):.{dec}f})가 스윕가({sweep_price:.{dec}f}) 이상으로 침범하여 발주를 보류합니다.")
                         time.sleep(2)
                         continue
-                    if asks_pre and round(float(asks_pre[0][0]), 4) <= round(sweep_price, 4):
-                        self.log(f"🚨 [외부 매도 침범 감지] 외부 매도가({float(asks_pre[0][0]):.4f})가 스윕가({sweep_price:.4f}) 이하로 침범하여 발주를 보류합니다.")
+                    if asks_pre and round(float(asks_pre[0][0]), dec) <= round(sweep_price, dec):
+                        self.log(f"🚨 [외부 매도 침범 감지] 외부 매도가({float(asks_pre[0][0]):.{dec}f})가 스윕가({sweep_price:.{dec}f}) 이하로 침범하여 발주를 보류합니다.")
                         time.sleep(2)
                         continue
 
@@ -1085,18 +1549,18 @@ class MarketMaker:
                         time.sleep(1)
                         continue
                         
-                    lowest_ask_now = round(float(asks_check[0][0]), 4)
+                    lowest_ask_now = round(float(asks_check[0][0]), dec)
                     lowest_ask_amt = float(asks_check[0][1])
                     
-                    if lowest_ask_now < round(sweep_price, 4):
+                    if lowest_ask_now < round(sweep_price, dec):
                         self.cancel_order(sell_id, symbol)
-                        self.log(f"🚨 [외부 매도 침범 감지] 최저매도가({lowest_ask_now:.4f})가 본인선매도가({sweep_price:.4f})보다 낮습니다! 선매도를 즉시 회수합니다.")
+                        self.log(f"🚨 [외부 매도 침범 감지] 최저매도가({lowest_ask_now:.{dec}f})가 본인선매도가({sweep_price:.{dec}f})보다 낮습니다! 선매도를 즉시 회수합니다.")
                         time.sleep(2)
                         continue
 
-                    if lowest_ask_now == round(sweep_price, 4) and lowest_ask_amt > (wash_air * 1.5):
+                    if lowest_ask_now == round(sweep_price, dec) and lowest_ask_amt > (wash_air * 1.5):
                         self.cancel_order(sell_id, symbol)
-                        self.log(f"🚨 [외부 물량 혼입 감지] 동일 호가({sweep_price:.4f})에 타인 물량({lowest_ask_amt:.4f})이 섞여 있어 선매도를 즉시 회수합니다.")
+                        self.log(f"🚨 [외부 물량 혼입 감지] 동일 호가({sweep_price:.{dec}f})에 타인 물량({lowest_ask_amt:.{amt_dec}f})이 섞여 있어 선매도를 즉시 회수합니다.")
                         time.sleep(2)
                         continue
                     

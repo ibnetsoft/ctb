@@ -25,7 +25,7 @@ def run_price_step_down():
     # 1. 현재 거래소 마지막 체결가 확인
     try:
         import requests
-        res = requests.get(f"https://openapi.digifinex.com/v3/ticker?symbol={symbol}", timeout=5).json()
+        res = requests.get(f"{client.base_url}/v3/ticker?symbol={symbol}", timeout=5).json()
         current_p = float(res.get("ticker", [{}])[0].get("last", 2541.0))
     except Exception as e:
         log(f"Ticker 조회 실패, 기본값 2541.0 사용: {e}")

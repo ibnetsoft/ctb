@@ -23,15 +23,56 @@
 <body class="p-6">
     <div class="max-w-7xl mx-auto space-y-6">
         
-        <!-- Tab Navigation -->
-        <nav class="flex gap-2">
-            <button onclick="switchTab('dashboard')" id="tab-dashboard" class="px-6 py-2 rounded-xl text-sm font-bold transition-all bg-emerald-500 text-black">
-                DASHBOARD
-            </button>
-            <button onclick="switchTab('settings')" id="tab-settings" class="px-6 py-2 rounded-xl text-sm font-bold transition-all bg-white/5 text-gray-400 hover:bg-white/10">
-                SETTINGS
-            </button>
+        <!-- Tab Navigation & Multi-Bot Switcher -->
+        <nav class="flex flex-wrap justify-between items-center gap-3 glass p-3 rounded-2xl">
+            <div class="flex gap-2">
+                <button onclick="switchTab('dashboard')" id="tab-dashboard" class="px-6 py-2 rounded-xl text-sm font-bold transition-all bg-emerald-500 text-black">
+                    DASHBOARD
+                </button>
+                <button onclick="switchTab('settings')" id="tab-settings" class="px-6 py-2 rounded-xl text-sm font-bold transition-all bg-white/5 text-gray-400 hover:bg-white/10">
+                    SETTINGS
+                </button>
+            </div>
+            <div class="flex items-center gap-2 flex-wrap">
+                <span class="text-[11px] text-gray-400 font-semibold uppercase tracking-wider mr-1">운용 봇 선택 (독립 동시 가동):</span>
+                <div id="bot-switcher" class="flex items-center gap-2 flex-wrap">
+                    <button onclick="selectBot('digifinex')" class="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-emerald-500/20 border border-emerald-500/50 text-emerald-300 flex items-center gap-2">
+                        <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
+                        DIGIFINEX (CTB_USDT)
+                    </button>
+                    <button onclick="selectBot('biconomy')" class="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-white/5 border border-white/10 text-gray-300 flex items-center gap-2">
+                        <span class="w-2 h-2 rounded-full bg-gray-500"></span>
+                        BICONOMY (AIR_USDT)
+                    </button>
+                </div>
+                <button onclick="promptCreateBot()" class="px-3 py-1.5 rounded-xl text-xs font-bold bg-indigo-500/20 hover:bg-indigo-500/30 border border-indigo-500/40 text-indigo-300 transition-all">
+                    + 봇 추가
+                </button>
+            </div>
         </nav>
+
+        <!-- Embedded Tunnel & Biconomy Whitelist IP Status Banner -->
+        <div class="glass px-5 py-3 rounded-2xl flex flex-wrap justify-between items-center gap-3 border border-emerald-500/20 bg-emerald-500/5">
+            <div class="flex items-center gap-3 flex-wrap">
+                <span class="px-2.5 py-1 rounded-lg bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-xs font-bold flex items-center gap-1.5">
+                    <span id="tunnel-dot" class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                    🛡️ DigiFinex 내장 무중단 우회터널: <span id="tunnel-mode-text" class="font-mono text-white">ACTIVE (127.0.0.1:10808)</span>
+                </span>
+                <span class="text-xs text-gray-400">
+                    한국 통신사 차단 자동 우회 (외부 무료 VPN 불필요 · 끊김 0%)
+                </span>
+            </div>
+            <div class="flex items-center gap-2 flex-wrap">
+                <span class="text-xs text-amber-300 font-bold">📌 Biconomy API 화이트리스트 등록 IP (직결 고정):</span>
+                <code id="biconomy-whitelist-ip" class="px-2.5 py-1 rounded-lg bg-black/50 border border-amber-500/40 text-amber-300 font-mono text-xs font-bold">조회중...</code>
+                <button onclick="copyWhitelistIp()" class="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-200 text-xs font-bold transition-all">
+                    📋 IP 복사
+                </button>
+                <button onclick="refreshTunnelIp()" id="btn-refresh-ip" class="px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 border border-white/15 text-gray-300 text-xs font-bold transition-all" title="Bright VPN 종료 후 클릭하면 실제 한국 고정 IP를 즉시 감지합니다">
+                    🔄 IP 새로고침
+                </button>
+            </div>
+        </div>
 
         <div id="view-dashboard" class="space-y-6">
             <!-- Header -->
@@ -333,6 +374,14 @@
 
         <!-- Settings View -->
         <div id="view-settings" class="hidden animate-in fade-in duration-500">
+            <div class="mb-4 glass p-4 rounded-2xl flex justify-between items-center border border-emerald-500/30 bg-emerald-500/5">
+                <div class="text-sm font-semibold text-gray-200 flex items-center gap-2">
+                    <span>🤖</span>
+                    <span>현재 편집 중인 봇 프로필:</span>
+                    <span id="settings-bot-badge" class="px-3 py-1 rounded-lg bg-emerald-500/20 text-emerald-300 font-mono font-bold text-xs">DIGIFINEX (CTB_USDT)</span>
+                </div>
+                <span class="text-xs text-gray-400">※ 상단 봇 선택 탭을 누르면 각 거래소 봇의 개별 API 키와 설정을 분리하여 저장/관리할 수 있습니다.</span>
+            </div>
             <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
                 <!-- API Settings -->
                 <div class="glass p-8 rounded-3xl space-y-6">
@@ -344,7 +393,7 @@
                         <div class="grid grid-cols-2 gap-4">
                             <div class="space-y-2">
                                 <label class="text-xs text-gray-400 uppercase tracking-widest font-bold">거래소 (Exchange)</label>
-                                <select id="set-exchange" class="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:border-emerald-500 outline-none transition-all">
+                                <select id="set-exchange" onchange="onSettingsExchangeChange(this.value)" class="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:border-emerald-500 outline-none transition-all">
                                     <option value="digifinex" class="bg-gray-900 text-white">DigiFinex (디지파이넥스)</option>
                                     <option value="biconomy" class="bg-gray-900 text-white">Biconomy (바이코노미)</option>
                                 </select>
@@ -433,7 +482,89 @@
 
     <script>
         let currentTab = 'dashboard';
+        let currentBotId = 'digifinex';
+        let availableBots = [];
         let isInitialized = false;
+
+        function renderBotSwitcher(botsList) {
+            if (Array.isArray(botsList) && botsList.length > 0) {
+                availableBots = botsList;
+            }
+            const container = document.getElementById('bot-switcher');
+            if (!container || !availableBots.length) return;
+            container.innerHTML = availableBots.map(b => {
+                const isSelected = (b.bot_id === currentBotId);
+                const isRunning = !!b.is_running;
+                const btnClass = isSelected
+                    ? 'px-3.5 py-1.5 rounded-xl text-xs font-bold bg-emerald-500/20 border-2 border-emerald-400 text-emerald-300 flex items-center gap-2 shadow-lg shadow-emerald-500/10'
+                    : 'px-3.5 py-1.5 rounded-xl text-xs font-bold bg-white/5 hover:bg-white/10 border border-white/10 text-gray-300 flex items-center gap-2 transition-all';
+                const dotClass = isRunning
+                    ? 'w-2 h-2 rounded-full bg-emerald-400 animate-pulse'
+                    : 'w-2 h-2 rounded-full bg-gray-500';
+                const stateLabel = isRunning ? 'ACTIVE' : 'STOPPED';
+                return `
+                    <button onclick="selectBot('${b.bot_id}')" class="${btnClass}">
+                        <span class="${dotClass}"></span>
+                        <span>${(b.exchange || '').toUpperCase()} (${b.symbol})</span>
+                        <span class="text-[10px] px-1.5 py-0.5 rounded ${isRunning ? 'bg-emerald-500/30 text-emerald-200' : 'bg-white/10 text-gray-400'}">${stateLabel}</span>
+                    </button>
+                `;
+            }).join('');
+        }
+
+        async function selectBot(botId) {
+            currentBotId = botId;
+            isInitialized = false;
+            const manualInput = document.getElementById('manual-price-input');
+            if (manualInput) manualInput.value = '';
+            try {
+                await fetch('/api/bots/select', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ bot_id: botId })
+                });
+            } catch (e) {}
+            renderBotSwitcher();
+            await fetchStatus();
+            await fetchLogs();
+            await fetchOrderbook();
+            if (currentTab === 'settings') {
+                await loadSettings();
+            }
+        }
+
+        function onSettingsExchangeChange(val) {
+            // 기본 프로필(digifinex/biconomy) 간 거래소 드롭다운 변경 시 해당 전용 프로필로 자동 전환하여 덮어쓰기 방지
+            if ((currentBotId === 'digifinex' || currentBotId === 'biconomy') && val !== currentBotId) {
+                const target = availableBots.find(b => b.bot_id === val);
+                if (target) {
+                    selectBot(val);
+                }
+            }
+        }
+
+        async function promptCreateBot() {
+            const exchange = prompt('추가할 봇의 거래소를 입력하세요 (digifinex 또는 biconomy):', 'biconomy');
+            if (!exchange) return;
+            const symbol = prompt('거래 페어(심볼)를 입력하세요 (예: AIR_USDT, CTB_USDT):', 'AIR_USDT');
+            if (!symbol) return;
+            try {
+                const res = await fetch('/api/bots/create', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ exchange: exchange.trim().toLowerCase(), symbol: symbol.trim().toUpperCase() })
+                });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    await selectBot(data.bot_id);
+                    switchTab('settings');
+                } else {
+                    alert('봇 생성 실패: ' + (data.message || '오류'));
+                }
+            } catch (err) {
+                alert('봇 생성 요청 실패: ' + err);
+            }
+        }
 
         function switchTab(tab) {
             currentTab = tab;
@@ -460,7 +591,7 @@
 
         async function loadSettings() {
             try {
-                const res = await fetch('/api/settings');
+                const res = await fetch(`/api/settings?bot_id=${encodeURIComponent(currentBotId)}`);
                 const data = await res.json();
                 if (data.exchange) document.getElementById('set-exchange').value = data.exchange;
                 if (data.symbol) document.getElementById('set-symbol').value = data.symbol;
@@ -469,6 +600,8 @@
                 document.getElementById('set-tg-token').value = data.telegram_token;
                 document.getElementById('set-tg-chat-id').value = data.telegram_chat_id;
                 document.getElementById('set-tg-enabled').checked = data.telegram_enabled;
+                const badge = document.getElementById('settings-bot-badge');
+                if (badge) badge.innerText = `${(data.exchange || '').toUpperCase()} (${data.symbol || ''}) [${currentBotId}]`;
             } catch (err) { console.error('Failed to load settings:', err); }
         }
 
@@ -479,6 +612,7 @@
             btn.disabled = true;
 
             const data = {
+                bot_id: currentBotId,
                 exchange: document.getElementById('set-exchange').value,
                 symbol: document.getElementById('set-symbol').value,
                 api_key: document.getElementById('set-api-key').value,
@@ -489,15 +623,16 @@
             };
 
             try {
-                const res = await fetch('/api/settings', {
+                const res = await fetch(`/api/settings?bot_id=${encodeURIComponent(currentBotId)}`, {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify(data)
                 });
                 const result = await res.json();
                 if (result.status === 'success') {
-                    alert('설정이 성공적으로 저장되었습니다! 봇이 새 거래소 및 API 키를 즉시 사용합니다.');
+                    alert(`[${currentBotId.toUpperCase()}] 설정이 분리 저장되었습니다!`);
                     isInitialized = false;
+                    loadSettings();
                     fetchStatus();
                 }
             } catch (err) { alert('설정 저장 실패: ' + err); }
@@ -510,7 +645,7 @@
             const btn = event.target;
             btn.disabled = true;
             try {
-                const res = await fetch('/api/test_telegram', { method: 'POST' });
+                const res = await fetch(`/api/test_telegram?bot_id=${encodeURIComponent(currentBotId)}`, { method: 'POST' });
                 const result = await res.json();
                 if (result.status === 'success') alert('Success! Check your Telegram.');
                 else alert('Error: ' + result.message);
@@ -528,7 +663,7 @@
             box.innerHTML = '<div class="text-center py-8 text-blue-400 animate-pulse font-semibold">거래소 API 서버와 통신 중입니다. 잠시만 기다려주세요...</div>';
 
             try {
-                const res = await fetch('/api/test_connection');
+                const res = await fetch(`/api/test_connection?bot_id=${encodeURIComponent(currentBotId)}`);
                 const data = await res.json();
                 
                 const timeEl = document.getElementById('conn-test-time');
@@ -682,7 +817,7 @@
             btn.disabled = true;
 
             try {
-                const res = await fetch('/api/cancel_all', { method: 'POST' });
+                const res = await fetch(`/api/cancel_all?bot_id=${encodeURIComponent(currentBotId)}`, { method: 'POST' });
                 const result = await res.json();
                 if (result.status === 'success') {
                     alert(`총 ${result.cancelled_count}개의 미체결 주문이 취소되었습니다.`);
@@ -706,10 +841,61 @@
             }
         }
 
+        function updateTunnelBanner(t) {
+            if (!t) return;
+            const ipEl = document.getElementById('biconomy-whitelist-ip');
+            if (ipEl && t.direct_ip) {
+                ipEl.innerText = t.direct_ip;
+            }
+            const modeEl = document.getElementById('tunnel-mode-text');
+            const dotEl = document.getElementById('tunnel-dot');
+            if (modeEl) {
+                if (t.local_bypass_alive || t.tunnel_healthy) {
+                    modeEl.innerText = `ACTIVE (${t.local_proxy || '127.0.0.1:10808'})`;
+                    if (dotEl) dotEl.className = 'w-2 h-2 rounded-full bg-emerald-400 animate-pulse';
+                } else {
+                    modeEl.innerText = 'RECONNECTING...';
+                    if (dotEl) dotEl.className = 'w-2 h-2 rounded-full bg-amber-400 animate-ping';
+                }
+            }
+        }
+
+        async function copyWhitelistIp() {
+            const ipEl = document.getElementById('biconomy-whitelist-ip');
+            const ip = ipEl ? ipEl.innerText.trim() : '';
+            if (!ip || ip === '조회중...') return;
+            try {
+                await navigator.clipboard.writeText(ip);
+                alert(`✅ Biconomy 화이트리스트 등록용 IP가 복사되었습니다:\n\n${ip}\n\n(참고: Bright VPN을 끄신 뒤 [🔄 IP 새로고침]을 누르시면 실제 한국 고정 공인 IP가 표시됩니다.)`);
+            } catch (e) {
+                prompt('아래 IP를 복사하여 Biconomy API 화이트리스트에 등록하세요:', ip);
+            }
+        }
+
+        async function refreshTunnelIp() {
+            const btn = document.getElementById('btn-refresh-ip');
+            if (btn) btn.innerText = '⏳ 감지중...';
+            try {
+                const res = await fetch('/api/tunnel_refresh', { method: 'POST' });
+                const t = await res.json();
+                updateTunnelBanner(t);
+            } catch (e) {
+                console.error(e);
+            } finally {
+                if (btn) btn.innerText = '🔄 IP 새로고침';
+            }
+        }
+
         async function fetchStatus() {
             try {
-                const response = await fetch('/api/status');
+                const response = await fetch(`/api/status?bot_id=${encodeURIComponent(currentBotId)}`);
                 const data = await response.json();
+                if (data.bots) {
+                    renderBotSwitcher(data.bots);
+                }
+                if (data.tunnel) {
+                    updateTunnelBanner(data.tunnel);
+                }
                 
                 // Connection Status
                 const connStatus = document.getElementById('conn-status');
@@ -769,19 +955,25 @@
                 // Initialize inputs only once on load
                 if (!isInitialized) {
                     const targetPriceInput = document.getElementById('target-price-input');
-                    if (targetPriceInput && data.air_target) targetPriceInput.value = targetPriceInput.value || data.air_target;
+                    if (targetPriceInput && data.air_target) targetPriceInput.value = data.air_target;
 
                     const priceOscToggle = document.getElementById('price-oscillation-toggle');
                     if (priceOscToggle) priceOscToggle.checked = data.price_oscillation_enabled;
 
                     const priceMinInput = document.getElementById('price-min-input');
-                    if (priceMinInput && data.price_min) priceMinInput.value = data.price_min;
+                    if (priceMinInput && data.price_min !== undefined) priceMinInput.value = data.price_min;
 
                     const priceMaxInput = document.getElementById('price-max-input');
-                    if (priceMaxInput && data.price_max) priceMaxInput.value = data.price_max;
+                    if (priceMaxInput && data.price_max !== undefined) priceMaxInput.value = data.price_max;
 
                     const priceStepInput = document.getElementById('price-step-input');
-                    if (priceStepInput && data.price_step) priceStepInput.value = data.price_step;
+                    if (priceStepInput && data.price_step !== undefined) priceStepInput.value = data.price_step;
+
+                    const gridCenterInput = document.getElementById('grid-center-price');
+                    if (gridCenterInput && data.price_min && data.price_max) {
+                        const midP = (Number(data.price_min) + Number(data.price_max)) / 2.0;
+                        gridCenterInput.value = midP >= 100 ? midP.toFixed(2) : (midP >= 1 ? midP.toFixed(4) : midP.toFixed(8));
+                    }
 
                     const microRangeToggle = document.getElementById('micro-range-toggle');
                     if (microRangeToggle && data.micro_range_enabled !== undefined) microRangeToggle.checked = data.micro_range_enabled;
@@ -841,7 +1033,7 @@
 
         async function fetchLogs() {
             try {
-                const response = await fetch('/api/logs');
+                const response = await fetch(`/api/logs?bot_id=${encodeURIComponent(currentBotId)}`);
                 const data = await response.json();
                 const logBox = document.getElementById('log-box');
                 
@@ -864,12 +1056,12 @@
         }
 
         async function toggleBot() {
-            await fetch('/api/toggle', { method: 'POST' });
+            await fetch(`/api/toggle?bot_id=${encodeURIComponent(currentBotId)}`, { method: 'POST' });
             fetchStatus();
         }
 
         async function updateParams() {
-            const beta = document.getElementById('beta-range').value;
+            const beta = document.getElementById('beta-range') ? document.getElementById('beta-range').value : 3.0;
             const interval = document.getElementById('interval-range').value;
             const target_price = document.getElementById('target-price-input') ? document.getElementById('target-price-input').value : 0;
             const micro_range_enabled = document.getElementById('micro-range-toggle') ? document.getElementById('micro-range-toggle').checked : true;
@@ -885,17 +1077,18 @@
             const price_max = parseFloat(document.getElementById('price-max-input').value) || 0;
             const price_step = parseFloat(document.getElementById('price-step-input').value) || 0;
 
-            await fetch('/api/config', {
+            await fetch(`/api/config?bot_id=${encodeURIComponent(currentBotId)}`, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({ 
+                    bot_id: currentBotId,
                     beta, interval, target_price, 
                     micro_range_enabled, micro_gap, micro_width, 
                     auto_pause_enabled, run_duration, pause_duration,
                     price_oscillation_enabled, price_min, price_max, price_step
                 })
             });
-            alert('설정이 성공적으로 저장되었습니다!');
+            alert(`[${currentBotId.toUpperCase()}] 설정이 성공적으로 저장되었습니다!`);
             isInitialized = false;
             fetchStatus();
         }
@@ -926,11 +1119,11 @@
 
         async function fetchOrderbook() {
             try {
-                const res = await fetch('/api/orderbook');
+                const res = await fetch(`/api/orderbook?bot_id=${encodeURIComponent(currentBotId)}`);
                 const data = await res.json();
                 latestOrderbook = data;
                 
-                const dec = (data.best_bid >= 1000) ? 2 : 4;
+                const dec = (data.best_bid >= 1000) ? 2 : (data.best_bid >= 1 ? 4 : 8);
                 
                 safeSetText('ob-best-bid', data.best_bid ? data.best_bid.toFixed(dec) : '--');
                 safeSetText('ob-best-ask', data.best_ask ? data.best_ask.toFixed(dec) : '--');
@@ -951,7 +1144,7 @@
 
         function setRecommendedPrice() {
             if (latestOrderbook && latestOrderbook.mid_sweep) {
-                const dec = (latestOrderbook.mid_sweep >= 1000) ? 2 : 4;
+                const dec = (latestOrderbook.mid_sweep >= 1000) ? 2 : (latestOrderbook.mid_sweep >= 1 ? 4 : 8);
                 document.getElementById('manual-price-input').value = latestOrderbook.mid_sweep.toFixed(dec);
             }
         }
@@ -966,14 +1159,15 @@
             const amount_usdt = parseFloat(document.getElementById('manual-usdt-input').value) || 15.0;
 
             try {
-                const res = await fetch('/api/manual_sweep', {
+                const res = await fetch(`/api/manual_sweep?bot_id=${encodeURIComponent(currentBotId)}`, {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ price, amount_usdt })
+                    body: JSON.stringify({ bot_id: currentBotId, price, amount_usdt })
                 });
                 const result = await res.json();
                 if (result.status === 'success') {
-                    alert(`✅ [스윕 체결 성공]\n체결 가격: ${result.price.toFixed(8)}\n수량: ${result.amount.toLocaleString()} AIR ($${result.usdt.toFixed(1)})\n\n100% 자가 맞체결 완료 (USDT 손실 0%)`);
+                    const dec = result.price >= 1 ? 4 : 8;
+                    alert(`✅ [스윕 체결 성공]\n체결 가격: ${result.price.toFixed(dec)}\n수량: ${result.amount.toLocaleString()} ($${result.usdt.toFixed(1)})\n\n100% 자가 맞체결 완료 (USDT 손실 0%)`);
                 } else {
                     alert(`⚠️ [스윕 실패 / 안전 방어 발동]\n${result.message}`);
                 }
@@ -989,9 +1183,9 @@
         }
 
         async function cancelAllOrders() {
-            if (!confirm('현재 계정의 모든 미체결 주문을 즉시 취소하시겠습니까?')) return;
+            if (!confirm('현재 선택된 봇 계정의 모든 미체결 주문을 즉시 취소하시겠습니까?')) return;
             try {
-                const res = await fetch('/api/cancel_all', { method: 'POST' });
+                const res = await fetch(`/api/cancel_all?bot_id=${encodeURIComponent(currentBotId)}`, { method: 'POST' });
                 const result = await res.json();
                 alert(`🧹 ${result.cancelled_count}개의 미체결 주문이 모두 취소되었습니다.\n가용 USDT: ${result.usdt_bal.toFixed(4)}`);
                 fetchStatus();
@@ -1042,10 +1236,12 @@
             const cancelExisting = document.getElementById('grid-cancel-existing')?.checked ?? true;
             const organic = document.getElementById('grid-organic')?.checked ?? true;
 
-            const centerPrice = centerPriceInput && centerPriceInput.value ? parseFloat(centerPriceInput.value) : 540.5;
+            const centerPrice = centerPriceInput && centerPriceInput.value ? parseFloat(centerPriceInput.value) : 0;
             const levels = levelsInput ? parseInt(levelsInput.value) || 12 : 12;
             const step = stepInput ? parseFloat(stepInput.value) || 0.04 : 0.04;
             const amount = amountInput ? parseFloat(amountInput.value) || 0.02 : 0.02;
+            const minPrice = parseFloat(document.getElementById('price-min-input')?.value) || 0;
+            const maxPrice = parseFloat(document.getElementById('price-max-input')?.value) || 0;
 
             const originalHtml = btn ? btn.innerHTML : '';
             if (btn) {
@@ -1055,17 +1251,18 @@
             }
 
             try {
-                const res = await fetch('/api/generate_grid', {
+                const res = await fetch(`/api/generate_grid?bot_id=${encodeURIComponent(currentBotId)}`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
+                        bot_id: currentBotId,
                         center_price: centerPrice,
                         levels: levels,
                         step: step,
                         amount: amount,
                         cancel_existing: cancelExisting,
-                        min_price: 540.0,
-                        max_price: 541.0,
+                        min_price: minPrice,
+                        max_price: maxPrice,
                         organic: organic
                     })
                 });
