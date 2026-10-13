@@ -559,6 +559,11 @@ class MarketMaker:
         self.cycle_amounts = [1000.0, 2000.0, 3000.0, 1000.0, 3000.0, 5000.0, 2000.0]
         self.cycle_index = 0
 
+        # 외부인 체결 상한선 추적 (이 가격보다 높은 가격으로는 절대 거래하지 않음)
+        self.last_external_sale_price = 0.00000136
+        self.recovery_history = []
+        self.recovery_in_progress = False
+
     def init_client(self):
         """거래소 설정에 맞춰 클라이언트 인스턴스 생성"""
         if self.config.exchange.lower() == "digifinex":
@@ -1014,7 +1019,7 @@ class MarketMaker:
 
     def replenish_buy_walls_if_needed(self):
         """
-        하단 매수벽 20개 (0.00000116 ~ 0.00000135, 각 약 $5.05) 점검:
+        하단 매수벽 20개 점검:
         체결되거나 누락된 호가가 있으면 자동으로 즉시 재발주하여 20개 완벽 복원
         """
         symbol = self.config.symbol
@@ -1027,7 +1032,13 @@ class MarketMaker:
                 for o in open_orders
                 if str(o.get("side", "")).lower() == "buy" and float(o.get("price", 0)) > 0
             }
-            wall_prices = [round(0.00000116 + i * 0.00000001, 8) for i in range(20)]
+            if existing_prices:
+                top_p = max(existing_prices)
+                # 현재 최상단 매수벽 아래로 20개의 연속 호가 생성
+                wall_prices = [round(top_p - i * 0.00000001, 8) for i in range(20)]
+            else:
+                wall_prices = [round(0.00000116 + i * 0.00000001, 8) for i in range(20)]
+
             missing = [p for p in wall_prices if p not in existing_prices]
             if missing:
                 self.log(f"🧱 [매수벽 자동 보충] 누락된 매수벽 {len(missing)}건 감지 ({[f'{p:.8f}' for p in missing]}) -> 자동 재배치 중...")
@@ -1035,9 +1046,53 @@ class MarketMaker:
                     amt = round(5.05 / p, 2)
                     self.client.place_order(symbol, 2, p, amt)
                     time.sleep(0.12)
-                self.log(f"✅ [매수벽 보충 완료] 하단 20개 매수벽(0.00000116~0.00000135) 100% 정상 복원 완료")
+                self.log(f"✅ [매수벽 보충 완료] 하단 20개 매수벽 100% 정상 복원 완료")
         except Exception as e:
             self.log(f"⚠️ 매수벽 점검/보충 오류: {e}")
+
+    def shift_down_buy_walls_and_create_vacant_slot(self) -> float:
+        """
+        [사용자 전략 핵심 로직]
+        외부인 체결 등으로 거래할 가격이 없을 때:
+        매수벽 20개 중 최상단 가격을 취소하고, 제일 낮은 가격 바로 아래(-1틱)에 신규 매수벽($5.05)을 생성하여
+        취소된 최상단 호가를 '거래할 빈 자리 가격(vacated_price)'으로 만들어 반환합니다.
+        (매수벽 20개 총액 $101.00 완벽 유지)
+        """
+        symbol = self.config.symbol
+        try:
+            open_orders = self.get_open_orders(symbol)
+            my_buy_orders = {
+                round(float(o.get("price", 0)), 8): str(o.get("id"))
+                for o in open_orders
+                if str(o.get("side", "")).lower() == "buy" and float(o.get("price", 0)) > 0
+            }
+            if not my_buy_orders:
+                return 0.00000135
+
+            prices = sorted(my_buy_orders.keys())
+            highest_price = prices[-1]
+            lowest_price = prices[0]
+            highest_oid = my_buy_orders[highest_price]
+
+            # 1) 가장 높은 가격의 매수벽 취소
+            self.cancel_order(highest_oid, symbol)
+            time.sleep(0.12)
+
+            # 2) 가장 낮은 가격 바로 아래(-1틱)에 신규 매수벽 발주 ($5.05)
+            new_lowest_price = round(lowest_price - 0.00000001, 8)
+            amt = round(5.05 / new_lowest_price, 2)
+            self.client.place_order(symbol, 2, new_lowest_price, amt)
+            time.sleep(0.15)
+
+            # 3) 최고가 자리가 이제 빈자리(vacant price)가 됨!
+            vacated_price = highest_price
+            self.log(
+                f"🔄 [매수벽 다운시프트] 상단 매수벽({highest_price:.8f}) 취소 ➔ 하단({new_lowest_price:.8f}) 신규 매수벽 생성 ➔ 빈자리({vacated_price:.8f}) 확보 완료!"
+            )
+            return vacated_price
+        except Exception as e:
+            self.log(f"⚠️ 매수벽 다운시프트 오류: {e}")
+            return 0.00000135
 
     def schedule_auto_recovery(self, reason: str):
         """
@@ -1143,30 +1198,48 @@ class MarketMaker:
         ]
         my_top_bid = max(my_buy_prices) if my_buy_prices else 0.00000135
 
-        # 외부 유저 매수호가($3 이상)가 있으면 그 바로 위(+1틱), 없으면 내 매수벽 20개 최상단(0.00000135) 바로 위(0.00000136)에서 거래
         tick = 0.00000001
-        if ext_bid > 0:
-            base_bid = ext_bid
-            base_bid_label = f"외부최우선매수: {ext_bid:.8f}"
-        else:
-            base_bid = my_top_bid
-            base_bid_label = f"내매수벽최상단: {my_top_bid:.8f}(외부매수없음)"
+        # [사용자 규칙] 외부인에게 토큰을 팔게 된 경우 절대 그 가격보다 높은 가격으로 거래하지 않음!
+        price_ceiling = getattr(self, "last_external_sale_price", None) or 0.00000136
 
-        target_price = round(base_bid + tick, 8)
+        # 정상적인 타겟가 후보 = 내 매수벽 최상단 바로 위 1틱
+        candidate_target = round(my_top_bid + tick, 8)
+
+        # 만약 후보 타겟가가 상한선(price_ceiling)보다 높으면(거래할 가격이 없으면):
+        # 매수벽 20개 중 최상단을 취소하고 최하단에 신규 매수벽을 생성하여 빈 자리를 만듦!
+        if candidate_target > price_ceiling:
+            self.log(
+                f"⚠️ 타겟 후보({candidate_target:.8f})가 상한선({price_ceiling:.8f})을 초과하여 거래할 가격이 없으므로, "
+                f"매수벽 20개 중 최상단을 빼고 최하단에 신규 매수벽을 생성하여 빈자리를 만듭니다."
+            )
+            target_price = self.shift_down_buy_walls_and_create_vacant_slot()
+            base_bid = round(target_price - tick, 8)
+            base_bid_label = f"매수벽다운시프트빈자리: {target_price:.8f}"
+        else:
+            target_price = candidate_target
+            base_bid = my_top_bid
+            base_bid_label = f"내매수벽최상단: {my_top_bid:.8f} 바로위"
+
         self.target_mid = target_price
         self.config.target_price = target_price
 
-        # 🛡️ 방어 1 (미끼 매수호가 자동 청소): 기준 매수벽(base_bid) 위에 $1.50 이하의 소액 미끼 매수호가(예: 1천원짜리)가 걸려 있으면 즉시 매도로 털어내고 target_price로 복귀!
+        # 🛡️ 방어 1 (외부 매수호가 처리 및 상한선 잠금): 기준 매수벽(base_bid) 위에 외부 매수호가가 있으면 체결 정리 후 상한선 잠금 및 다운시프트
         if raw_top_ext_bid > base_bid:
-            if raw_top_ext_usdt <= 1.50:
-                self.log(f"🧹 [미끼 매수호가 자동 제거] {raw_top_ext_bid:.8f} (${raw_top_ext_usdt:.4f}) 소액 매수호가 감지 -> 즉시 체결 제거 후 {target_price:.8f} 복귀")
-                sweep_amt = round(5.05 / raw_top_ext_bid, 2)
+            if raw_top_ext_bid <= max_ceiling_price and raw_top_ext_usdt <= 15.0:
+                self.log(f"🧹 [외부 매수호가 체결 정리] {raw_top_ext_bid:.8f} (${raw_top_ext_usdt:.4f}) 외부 매수호가 감지 -> 매도로 체결(USDT 획득) 후 다운시프트 복귀")
+                sweep_amt = round(max(5.05, raw_top_ext_usdt) / raw_top_ext_bid, 2)
                 s_res = self.client.place_order(symbol, 1, raw_top_ext_bid, sweep_amt)
                 s_oid = str(s_res.get("result", {}).get("id") or s_res.get("order_id") or "")
-                time.sleep(0.15)
+                time.sleep(0.20)
                 if s_oid:
                     self.cancel_order(s_oid, symbol)
                 time.sleep(0.25)
+                # 외부인에게 체결된 가격을 상한선으로 잠금 (절대 이 가격보다 높은 가격으로 거래하지 않음!)
+                self.last_external_sale_price = raw_top_ext_bid
+                # 매수벽 20개 다운시프트로 안전한 빈 자리 확보
+                target_price = self.shift_down_buy_walls_and_create_vacant_slot()
+                self.target_mid = target_price
+                self.config.target_price = target_price
                 # 체결 후 현재가가 높아진 경우 target_price까지 계단식 하향 복귀
                 step_p = round(raw_top_ext_bid * 0.52, 8)
                 while step_p > target_price:
@@ -1183,12 +1256,14 @@ class MarketMaker:
                 self.usdt_total = float(pre_balances.get("USDT", {}).get("total", self.usdt_total))
                 pre_air_total = self.air_total
                 pre_usdt_total = self.usdt_total
+                self.log(f"✅ [외부 매수 체결 완료] {raw_top_ext_bid:.8f} 외부 주문 체결 완료 (USDT총액: ${self.usdt_total:.2f}). 다음 스텝으로 진행합니다.")
+                return {"status": "success", "message": f"외부 매수호가({raw_top_ext_bid:.8f}) 체결 정리 완료"}
             else:
                 self.emergency_stop_biconomy(
-                    f"기준 매수벽({base_bid:.8f}) 위에 미끼 매수호가({raw_top_ext_bid:.8f}, ${raw_top_ext_usdt:.4f}) 감지 -> 고가 유인 원천 차단(발주 0건)",
+                    f"기준 매수벽({base_bid:.8f}) 위에 비정상 대형 매수호가({raw_top_ext_bid:.8f}, ${raw_top_ext_usdt:.4f}) 감지 -> 고가 유인 원천 차단(발주 0건)",
                     pre_usdt=pre_usdt_total, pre_air=pre_air_total
                 )
-                return {"status": "emergency_stop", "message": "소액 미끼 매수호가 감지로 발주 전 즉시 중단"}
+                return {"status": "emergency_stop", "message": "비정상 고가 매수호가 감지로 발주 전 즉시 중단"}
 
         # 🛡️ 방어 2 (최대 상한선 잠금): 타겟가가 안전 상한선(0.00000230)을 초과하면 절대 발주하지 않고 즉시 중단!
         if target_price > round(max_ceiling_price + 1e-9, 8):
@@ -1288,6 +1363,22 @@ class MarketMaker:
 
         # 5-1) 방금 넣은 선매도(sell_id)나 후매수(buy_id)가 미체결로 남아 있다면 외부 물량과 엉킨 것!
         if sell_id in post_open_ids or buy_id in post_open_ids:
+            # 선매도가 외부인에게 체결되어 사라지고 후매수만 미체결로 남은 경우 (외부인 토큰 매수 체결 발생)
+            if sell_id not in post_open_ids and buy_id in post_open_ids:
+                # 1) 외부인에게 팔린 가격 기록 (다음 거래는 절대 이 가격보다 높게 거래하지 않음!)
+                self.last_external_sale_price = target_price
+                if buy_id:
+                    self.cancel_order(buy_id, symbol)
+                self.log(
+                    f"📢 [외부인 토큰 매수 체결] 외부인이 {target_price:.8f}에 선매도 물량을 매수했습니다! "
+                    f"-> 절대 이 가격({target_price:.8f})보다 높은 가격으로 거래하지 않도록 상한선을 잠그고 매수벽을 다운시프트합니다."
+                )
+                # 2) 거래할 빈자리 확보를 위해 매수벽 20개 다운시프트 실행
+                self.shift_down_buy_walls_and_create_vacant_slot()
+                # 3) 안전 쿨다운 후 자동 재가동
+                self.schedule_auto_recovery(f"외부인 선매도 매수 체결({target_price:.8f}) -> 매수벽 다운시프트 후 안전 재가동")
+                return {"status": "auto_recovery", "message": "외부인 체결 후 매수벽 다운시프트 및 재가동"}
+
             self.emergency_stop_biconomy(
                 f"자전 주문({target_price:.8f}) 중 미체결 잔량 발생 (외부 물량 개입 감지)",
                 cancel_ids=[sell_id, buy_id], pre_usdt=pre_usdt_total, pre_air=pre_air_total

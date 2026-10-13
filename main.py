@@ -214,6 +214,9 @@ async def refresh_tunnel_status():
 async def toggle_bot(bot_id: str = Query(default=None), data: dict = {}):
     bid, config, bot = resolve_bot(bot_id=bot_id, data=data)
     config.is_running = not config.is_running
+    if config.is_running:
+        bot.recovery_history = []
+        bot.recovery_in_progress = False
     return {"bot_id": bid, "is_running": config.is_running}
 
 @app.post("/api/manual_sweep")
