@@ -217,6 +217,12 @@ async def toggle_bot(bot_id: str = Query(default=None), data: dict = {}):
     if config.is_running:
         bot.recovery_history = []
         bot.recovery_in_progress = False
+    else:
+        # 🛡️ [절대 매도 방치 금지] 사용자가 STOP을 누르는 즉시 잔여 매도 주문 전량 즉시 취소
+        try:
+            bot.cancel_all_sell_orders(config.symbol)
+        except Exception as e:
+            bot.log(f"⚠️ STOP 토글 시 매도 취소 예외: {e}")
     return {"bot_id": bid, "is_running": config.is_running}
 
 @app.post("/api/manual_sweep")

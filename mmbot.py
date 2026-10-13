@@ -628,6 +628,33 @@ class MarketMaker:
     def cancel_all_orders(self, symbol: str):
         return self.client.cancel_all_orders(symbol)
 
+    def cancel_all_sell_orders(self, symbol: str = None) -> int:
+        """
+        [절대 매도 방치 금지]
+        호가창에 남아있는 모든 매도(Ask) 주문만 즉시 감지하여 전량 취소합니다.
+        (매수벽 주문은 안전하게 보존됨)
+        """
+        sym = symbol or self.config.symbol
+        cancelled = 0
+        try:
+            orders = self.get_open_orders(sym)
+            if not orders:
+                return 0
+            for o in orders:
+                side_str = str(o.get("side", "")).lower()
+                # DigiFinex: 'sell' / Biconomy: 1 or 'sell' / 'ask'
+                if side_str in ("sell", "1", "ask"):
+                    oid = str(o.get("id", ""))
+                    if oid:
+                        self.cancel_order(oid, sym)
+                        cancelled += 1
+                        time.sleep(0.04)
+            if cancelled > 0:
+                self.log(f"🧹 [매도 주문 전량 긴급 취소] 잔여 매도 주문 {cancelled}건을 전량 즉시 취소했습니다. (매도 방치 0건)")
+        except Exception as e:
+            self.log(f"⚠️ 매도 주문 취소 중 예외 발생: {e}")
+        return cancelled
+
     def update_orderbook_seamlessly(self, center_price: float = None, levels: int = 12, min_price: float = None, max_price: float = None) -> dict:
         """
         호가창을 절대 전부 비우지 않고(No Full Wipe), 기존 호가의 대다수를 유지하면서
@@ -968,6 +995,7 @@ class MarketMaker:
         """
         symbol = self.config.symbol
         base_asset = self.get_base_asset_name()
+        # 🛡️ 1순위 긴급 회수: 지정된 자전 주문 취소
         if cancel_ids:
             for oid in cancel_ids:
                 if oid:
@@ -976,6 +1004,12 @@ class MarketMaker:
                         time.sleep(0.05)
                     except Exception:
                         pass
+
+        # 🛡️ [매도 주문 절대 방치 금지] 어떤 이유로든 비상 중단 시 혹시 남아있을 수 있는 모든 매도 주문을 전량 강제 취소
+        try:
+            self.cancel_all_sell_orders(symbol)
+        except Exception as e:
+            self.log(f"⚠️ 비상 중단 중 매도 주문 일괄 취소 예외: {e}")
 
         self.config.is_running = False
         self.last_status = f"🚨 비상 중단: {reason}"
@@ -1311,8 +1345,17 @@ class MarketMaker:
                     self.log(f"🔄 [호가 밴드(11024) 자동 복귀] 현재가({curr_last:.8f}) -> 타겟가({target_price:.8f}) 단계적 하향 조정")
                     step_p = round(curr_last * 0.70, 8)
                     while step_p > target_price:
-                        self.client.place_simultaneous_wash_pair(symbol, step_p, round(5.15 / step_p, 2), 0.03)
+                        s_res, b_res = self.client.place_simultaneous_wash_pair(symbol, step_p, round(5.15 / step_p, 2), 0.03)
                         time.sleep(0.35)
+                        # 안전 점검: 단계적 하향 중 혹시라도 미체결 매도가 남지 않도록 즉시 정리
+                        s_r = (s_res.get("result") or {})
+                        s_id = str(s_r.get("id") or s_res.get("order_id") or "")
+                        if s_id:
+                            time.sleep(0.1)
+                            # 체결 여부 확인 후 미체결이면 즉시 취소
+                            check_orders = self.get_open_orders(symbol)
+                            if any(str(o.get("id")) == s_id for o in check_orders):
+                                self.cancel_order(s_id, symbol)
                         next_p = round(step_p * 0.75, 8)
                         if next_p <= target_price or next_p == step_p:
                             break
@@ -1553,11 +1596,21 @@ class MarketMaker:
         while True:
             # 봇 정지 상태 확인 (대시보드 제어용: 사용자가 START 버튼을 눌러야만 실행)
             if not self.config.is_running:
+                # 🛡️ [절대 매도 방치 금지] 정지 상태 전환 시 호가창에 남아있는 모든 매도 주문을 즉시 전량 취소
+                if not getattr(self, "_cleaned_up_on_stop", False):
+                    try:
+                        self.cancel_all_sell_orders(symbol)
+                    except Exception:
+                        pass
+                    self._cleaned_up_on_stop = True
+
                 if not str(self.last_status).startswith("🚨"):
                     self.last_status = "Stopped (Standby)"
                 self.auto_pause_state_start = time.time()
                 time.sleep(1)
                 continue
+            else:
+                self._cleaned_up_on_stop = False
 
             # 자동 일시정지 타이머 체크
             if self.config.auto_pause_enabled:
