@@ -460,6 +460,8 @@ class BotConfig:
         self.auto_pause_enabled = False
         self.run_duration = 120
         self.pause_duration = 30
+        self.auto_recovery_enabled = True
+        self.auto_recovery_delay = 30
         
         self.load_config()
 
@@ -488,6 +490,8 @@ class BotConfig:
                     self.auto_pause_enabled = bool(data.get("auto_pause_enabled", self.auto_pause_enabled))
                     self.run_duration = int(data.get("run_duration", self.run_duration))
                     self.pause_duration = int(data.get("pause_duration", self.pause_duration))
+                    self.auto_recovery_enabled = bool(data.get("auto_recovery_enabled", self.auto_recovery_enabled))
+                    self.auto_recovery_delay = int(data.get("auto_recovery_delay", self.auto_recovery_delay))
                     if not self.name:
                         self.name = f"{self.exchange.upper()} ({self.symbol})"
             except Exception as e:
@@ -983,8 +987,8 @@ class MarketMaker:
                 self.usdt_freeze = float(balances.get("USDT", {}).get("freeze", "0"))
                 self.usdt_total = float(balances.get("USDT", {}).get("total", self.usdt_bal + self.usdt_freeze))
 
-                init_usdt = getattr(self, "initial_usdt_total", 857.71097347)
-                init_air = getattr(self, "initial_air_total", 2886245369.568)
+                init_usdt = getattr(self, "initial_usdt_total", self.usdt_total)
+                init_air = getattr(self, "initial_air_total", self.air_total)
                 step_usdt_diff = (self.usdt_total - pre_usdt) if pre_usdt is not None else 0.0
                 step_air_diff = (self.air_total - pre_air) if pre_air is not None else 0.0
                 total_usdt_diff = self.usdt_total - init_usdt
@@ -992,8 +996,8 @@ class MarketMaker:
 
                 bal_report = (
                     f"📊 [비상 중단 잔고 변화] 현재 USDT 총액: ${self.usdt_total:.4f} (가용: ${self.usdt_bal:.4f}, 매수벽동결: ${self.usdt_freeze:.2f}) | "
-                    f"이번 스텝 ΔUSDT: {step_usdt_diff:+.4f}$ (최초대비 누적 ΔUSDT: {total_usdt_diff:+.4f}$) | "
-                    f"이번 스텝 Δ{base_asset}: {step_air_diff:+,.2f} (최초대비 누적 Δ{base_asset}: {total_air_diff:+,.2f})"
+                    f"이번 스텝 ΔUSDT: {step_usdt_diff:+.4f}$ (시작대비 누적 ΔUSDT: {total_usdt_diff:+.4f}$) | "
+                    f"이번 스텝 Δ{base_asset}: {step_air_diff:+,.2f} (시작대비 누적 Δ{base_asset}: {total_air_diff:+,.2f})"
                 )
         except Exception as e:
             bal_report = f"⚠️ 비상 중단 잔고 조회 오류: {e}"
@@ -1004,11 +1008,99 @@ class MarketMaker:
             self.log(bal_report)
         self.send_telegram(msg + ("\n" + bal_report if bal_report else ""))
 
+        # 자동 재가동(자가 복구) 스케줄링 실행
+        self.schedule_auto_recovery(reason)
+
+    def replenish_buy_walls_if_needed(self):
+        """
+        하단 매수벽 20개 (0.00000116 ~ 0.00000135, 각 약 $5.05) 점검:
+        체결되거나 누락된 호가가 있으면 자동으로 즉시 재발주하여 20개 완벽 복원
+        """
+        symbol = self.config.symbol
+        if self.config.exchange.lower() != "biconomy":
+            return
+        try:
+            open_orders = self.get_open_orders(symbol)
+            existing_prices = {
+                round(float(o.get("price", 0)), 8)
+                for o in open_orders
+                if str(o.get("side", "")).lower() == "buy" and float(o.get("price", 0)) > 0
+            }
+            wall_prices = [round(0.00000116 + i * 0.00000001, 8) for i in range(20)]
+            missing = [p for p in wall_prices if p not in existing_prices]
+            if missing:
+                self.log(f"🧱 [매수벽 자동 보충] 누락된 매수벽 {len(missing)}건 감지 ({[f'{p:.8f}' for p in missing]}) -> 자동 재배치 중...")
+                for p in missing:
+                    amt = round(5.05 / p, 2)
+                    self.client.place_order(symbol, 2, p, amt)
+                    time.sleep(0.12)
+                self.log(f"✅ [매수벽 보충 완료] 하단 20개 매수벽(0.00000116~0.00000135) 100% 정상 복원 완료")
+        except Exception as e:
+            self.log(f"⚠️ 매수벽 점검/보충 오류: {e}")
+
+    def schedule_auto_recovery(self, reason: str):
+        """
+        비상 중단 후 30초 쿨다운 ➔ 하단 매수벽 20개 점검/보충 ➔ 자동 재가동
+        (단, 10분 내 5회 이상 연속 중단 시 서킷 브레이커로 자산 보호)
+        """
+        if not getattr(self.config, "auto_recovery_enabled", True):
+            return
+        if getattr(self, "recovery_in_progress", False):
+            return
+
+        now = time.time()
+        # 최근 10분(600초) 이내의 비상 중단 이력만 유지
+        if not hasattr(self, "recovery_history"):
+            self.recovery_history = []
+        self.recovery_history = [t for t in self.recovery_history if now - t < 600]
+        self.recovery_history.append(now)
+
+        # 서킷 브레이커: 10분 내 5회 연속 중단 시 완전 정지
+        if len(self.recovery_history) >= 5:
+            cb_msg = f"🛑 [서킷 브레이커 발동] 10분 내 비상 중단이 5회 연속 발생했습니다. 비정상적인 외부 개입으로부터 자산을 보호하기 위해 자동 재가동을 중지하고 완전 정지합니다."
+            self.log(cb_msg)
+            self.send_telegram(cb_msg)
+            return
+
+        self.recovery_in_progress = True
+        cooldown_sec = getattr(self.config, "auto_recovery_delay", 30)
+
+        def _recovery_worker():
+            try:
+                self.log(f"⏳ [자가 복구 대기] 외부 개입 감지 후 {cooldown_sec}초간 안전 쿨다운 후 봇을 자동으로 재시작합니다...")
+                time.sleep(cooldown_sec)
+
+                # 1) 매수벽 20개 점검 및 보충
+                self.log("🔧 [자가 복구 진행] 1) 하단 매수벽 20개 점검 및 누락분 자동 재배치...")
+                self.replenish_buy_walls_if_needed()
+
+                # 2) 잔고 및 호가창 확인
+                self.log("🔧 [자가 복구 진행] 2) 잔고 확인 및 호가 정렬 완료...")
+                pre_bals = self.get_balances()
+                if pre_bals:
+                    base_asset = self.get_base_asset_name()
+                    self.air_bal = float(pre_bals.get(base_asset, {}).get("available", "0"))
+                    self.usdt_bal = float(pre_bals.get("USDT", {}).get("available", "0"))
+                    self.usdt_total = float(pre_bals.get("USDT", {}).get("total", self.usdt_bal))
+
+                # 3) 봇 자동 재가동
+                self.config.is_running = True
+                self.last_status = "Active (Auto-Recovered)"
+                resume_msg = f"🔄 [자가 복구 완료] 비상 상황 후 쿨다운({cooldown_sec}s) 및 안전 점검 완료 -> 자전거래를 자동 재개했습니다!"
+                self.log(resume_msg)
+                self.send_telegram(resume_msg)
+            except Exception as e:
+                self.log(f"⚠️ 자가 복구 워커 예외: {e}")
+            finally:
+                self.recovery_in_progress = False
+
+        threading.Thread(target=_recovery_worker, daemon=True).start()
+
     def execute_biconomy_safe_wash_step(self, custom_usdt: float = None) -> dict:
         """
         Biconomy (AIR_USDT) 전용 안전 자전거래 1회 실행:
         1원칙: 외부 유저 주문과는 절대 거래하지 않음 (하단 매수벽 20개는 그대로 유지)
-        2원칙: 진짜 외부 매수벽($3 이상, 현재 0.00000228) 바로 위(+0.00000001 = 0.00000229)에서 $5.1~$5.5 불규칙 동시 자전(시차 0.03초)
+        2원칙: 진짜 외부 매수벽($3 이상)이 있으면 그 바로 위(+1틱), 없으면 내 매수벽 20개 최상단(0.00000135) 바로 위(0.00000136)에서 $5.1~$5.5 불규칙 동시 자전(시차 0.03초)
         3원칙: 소액 미끼 호가 출현, 안전 상한선(0.00000230) 초과, 또는 외부 물량 개입 시 주문 전/즉시 비상 중단
         """
         symbol = self.config.symbol
@@ -1028,8 +1120,8 @@ class MarketMaker:
         self.usdt_total = float(pre_balances.get("USDT", {}).get("total", self.usdt_bal + self.usdt_freeze))
 
         if not hasattr(self, "initial_usdt_total") or self.initial_usdt_total <= 0:
-            self.initial_usdt_total = 857.71097347
-            self.initial_air_total = 2886245369.568
+            self.initial_usdt_total = self.usdt_total
+            self.initial_air_total = self.air_total
 
         pre_air_total = self.air_total
         pre_usdt_total = self.usdt_total
@@ -1040,25 +1132,62 @@ class MarketMaker:
 
         # 1. 외부 최우선 매수호가($3 이상 진짜 매수벽) 및 상단 미끼 호가 탐색
         ext_bid, ext_ask, pre_open_orders, ob, raw_top_ext_bid, raw_top_ext_usdt = self.find_external_best_orders(symbol, min_wall_usdt=3.0)
-        if ext_bid <= 0:
-            self.log("⚠️ 외부 유저 매수호가($3 이상)를 찾을 수 없어 대기합니다.")
-            return {"status": "error", "message": "외부 매수호가 없음"}
-
         pre_wall_ids = {str(o.get("id")) for o in pre_open_orders if o.get("id")}
 
-        # 타겟 자전 가격 = 진짜 외부 매수벽 바로 위 가격 (+0.00000001)
+        # 내 매수벽(20개) 중 최상단 가격 확인 (기본값 0.00000135)
+        my_buy_prices = [
+            round(float(o.get("price", 0)), 8)
+            for o in pre_open_orders
+            if str(o.get("side", "")).lower() == "buy" and float(o.get("price", 0)) > 0
+        ]
+        my_top_bid = max(my_buy_prices) if my_buy_prices else 0.00000135
+
+        # 외부 유저 매수호가($3 이상)가 있으면 그 바로 위(+1틱), 없으면 내 매수벽 20개 최상단(0.00000135) 바로 위(0.00000136)에서 거래
         tick = 0.00000001
-        target_price = round(ext_bid + tick, 8)
+        if ext_bid > 0:
+            base_bid = ext_bid
+            base_bid_label = f"외부최우선매수: {ext_bid:.8f}"
+        else:
+            base_bid = my_top_bid
+            base_bid_label = f"내매수벽최상단: {my_top_bid:.8f}(외부매수없음)"
+
+        target_price = round(base_bid + tick, 8)
         self.target_mid = target_price
         self.config.target_price = target_price
 
-        # 🛡️ 방어 1 (미끼 매수호가 감지 차단): 진짜 매수벽(예: 0.00000228) 위에 $3 미만의 소액 미끼 매수호가(예: 0.00000380에 4.5원어치)가 걸려 있으면 절대 따라 올라가지 않고 발주 전 즉시 중단!
-        if raw_top_ext_bid > ext_bid:
-            self.emergency_stop_biconomy(
-                f"진짜 매수벽({ext_bid:.8f}) 위에 소액 미끼 매수호가({raw_top_ext_bid:.8f}, ${raw_top_ext_usdt:.4f}) 감지 -> 고가 유인 원천 차단(발주 0건)",
-                pre_usdt=pre_usdt_total, pre_air=pre_air_total
-            )
-            return {"status": "emergency_stop", "message": "소액 미끼 매수호가 감지로 발주 전 즉시 중단"}
+        # 🛡️ 방어 1 (미끼 매수호가 자동 청소): 기준 매수벽(base_bid) 위에 $0.50 이하의 초소액 미끼 매수호가(예: 4원짜리)가 걸려 있으면 즉시 매도로 털어내고 0.00000136으로 복귀!
+        if raw_top_ext_bid > base_bid:
+            if raw_top_ext_usdt <= 0.50:
+                self.log(f"🧹 [미끼 매수호가 자동 제거] {raw_top_ext_bid:.8f} (${raw_top_ext_usdt:.4f}) 초소액 매수호가 감지 -> 즉시 체결 제거 후 {target_price:.8f} 복귀")
+                sweep_amt = round(5.05 / raw_top_ext_bid, 2)
+                s_res = self.client.place_order(symbol, 1, raw_top_ext_bid, sweep_amt)
+                s_oid = str(s_res.get("result", {}).get("id") or s_res.get("order_id") or "")
+                time.sleep(0.15)
+                if s_oid:
+                    self.cancel_order(s_oid, symbol)
+                time.sleep(0.25)
+                # 체결 후 현재가가 높아진 경우 target_price까지 계단식 하향 복귀
+                step_p = round(raw_top_ext_bid * 0.52, 8)
+                while step_p > target_price:
+                    if ext_ask <= 0 or step_p < ext_ask:
+                        self.client.place_simultaneous_wash_pair(symbol, step_p, round(5.15 / step_p, 2), 0.03)
+                        time.sleep(0.35)
+                    next_p = round(step_p * 0.80, 8)
+                    if next_p <= target_price or next_p == step_p:
+                        break
+                    step_p = next_p
+                # 잔고 스냅샷 갱신
+                pre_balances = self.get_balances() or pre_balances
+                self.air_total = float(pre_balances.get(base_asset, {}).get("total", self.air_total))
+                self.usdt_total = float(pre_balances.get("USDT", {}).get("total", self.usdt_total))
+                pre_air_total = self.air_total
+                pre_usdt_total = self.usdt_total
+            else:
+                self.emergency_stop_biconomy(
+                    f"기준 매수벽({base_bid:.8f}) 위에 미끼 매수호가({raw_top_ext_bid:.8f}, ${raw_top_ext_usdt:.4f}) 감지 -> 고가 유인 원천 차단(발주 0건)",
+                    pre_usdt=pre_usdt_total, pre_air=pre_air_total
+                )
+                return {"status": "emergency_stop", "message": "소액 미끼 매수호가 감지로 발주 전 즉시 중단"}
 
         # 🛡️ 방어 2 (최대 상한선 잠금): 타겟가가 안전 상한선(0.00000230)을 초과하면 절대 발주하지 않고 즉시 중단!
         if target_price > round(max_ceiling_price + 1e-9, 8):
@@ -1121,6 +1250,28 @@ class MarketMaker:
         sell_id = str(res_sell.get("result", {}).get("id") or res_sell.get("order_id") or "")
         buy_id = str(res_buy.get("result", {}).get("id") or res_buy.get("order_id") or "")
 
+        # 50% 호가 밴드 오류(code: 11024) 발생 시 이전 체결가로부터 타겟가까지 자동 단계적 하향 조정
+        if (res_sell.get("code") == 11024 or res_buy.get("code") == 11024):
+            try:
+                t_resp = requests.get(f"{self.client.base_url}/api/v1/tickers", timeout=3).json()
+                t_items = [t for t in t_resp.get("ticker", []) if t.get("symbol") == symbol]
+                curr_last = float(t_items[0].get("last", 0)) if t_items else 0
+                if curr_last > target_price * 1.3:
+                    self.log(f"🔄 [호가 밴드(11024) 자동 복귀] 현재가({curr_last:.8f}) -> 타겟가({target_price:.8f}) 단계적 하향 조정")
+                    step_p = round(curr_last * 0.70, 8)
+                    while step_p > target_price:
+                        self.client.place_simultaneous_wash_pair(symbol, step_p, round(5.15 / step_p, 2), 0.03)
+                        time.sleep(0.35)
+                        next_p = round(step_p * 0.75, 8)
+                        if next_p <= target_price or next_p == step_p:
+                            break
+                        step_p = next_p
+                    res_sell, res_buy = self.client.place_simultaneous_wash_pair(symbol, target_price, wash_air, head_start_sec=0.03)
+                    sell_id = str(res_sell.get("result", {}).get("id") or res_sell.get("order_id") or "")
+                    buy_id = str(res_buy.get("result", {}).get("id") or res_buy.get("order_id") or "")
+            except Exception:
+                pass
+
         if res_sell.get("code") != 0 or not sell_id or res_buy.get("code") != 0 or not buy_id:
             self.emergency_stop_biconomy(
                 f"동시 자전 발주 중 일부 실패(sell={res_sell}, buy={res_buy})로 잔여 긴급 회수",
@@ -1173,17 +1324,17 @@ class MarketMaker:
 
         self.last_status = f"Active ({target_price:.8f} | ${wash_usdt:.2f})"
         self.log(
-            f"✅ [Biconomy 무결점 자전 완료] 외부최우선매수: {ext_bid:.8f} -> 체결가: {target_price:.8f} | "
+            f"✅ [Biconomy 무결점 자전 완료] {base_bid_label} -> 체결가: {target_price:.8f} | "
             f"수량: {wash_air:,.2f} {base_asset} (${wash_usdt:.2f}) | USDT총액: ${self.usdt_total:.2f} (변화 0)"
         )
         return {
             "status": "success",
             "price": target_price,
-            "external_best_bid": ext_bid,
+            "external_best_bid": base_bid,
             "external_best_ask": ext_ask,
             "amount": wash_air,
             "usdt": wash_usdt,
-            "best_bid": ext_bid,
+            "best_bid": base_bid,
             "best_ask": ext_ask,
             "message": f"자전 체결 완료: {target_price:.8f} (${wash_usdt:.2f})"
         }
